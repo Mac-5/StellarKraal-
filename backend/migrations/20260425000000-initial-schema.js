@@ -23,6 +23,18 @@ exports.up = function(db) {
     });
   }).then(function(data) {
     return db.runSql(data);
+  }).then(function() {
+    return db.runSql(
+      'CREATE TABLE IF NOT EXISTS loan_transitions (' +
+      'id SERIAL PRIMARY KEY, ' +
+      'loan_id INTEGER NOT NULL, ' +
+      'from_status VARCHAR(32) NOT NULL, ' +
+      'to_status VARCHAR(32) NOT NULL, ' +
+      'transitioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'triggered_by VARCHAR(32) NOT NULL CHECK (triggered_by IN (\'job\', \'api\', \'liquidation\'))' +
+      ');' +
+      'CREATE INDEX IF NOT EXISTS idx_loan_transitions_loan_id ON loan_transitions (loan_id, transitioned_at);'
+    );
   });
 };
 
@@ -34,7 +46,9 @@ exports.down = function(db) {
       resolve(data);
     });
   }).then(function(data) {
-    return db.runSql(data);
+    return db.runSql('DROP TABLE IF EXISTS loan_transitions;').then(function() {
+      return db.runSql(data);
+    });
   });
 };
 
