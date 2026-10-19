@@ -22,7 +22,7 @@
  * See docs/protocol/events.md §5–§23 for their full schemas.
  */
 
-import { rpc as SorobanRpc, xdr, Address } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc, xdr, Address, StrKey } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import logger from "./utils/logger";
 import { rpcClient } from "./utils/rpcClient";
@@ -132,6 +132,21 @@ function logEvent(
 }
 
 /**
+ * Decode a Soroban account address ScVal into a base32 Stellar G-address.
+ * @param val - ScVal expected to wrap an account address.
+ * @returns The StrKey-encoded G-address, or an empty string if decoding fails.
+ */
+export function decodeAccountAddress(val: any): string {
+  try {
+    const ed25519 = val?.address?.()?.accountId?.()?.ed25519?.();
+    if (!ed25519) return "";
+    return StrKey.encodeEd25519PublicKey(Buffer.from(ed25519));
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Parse a contract event and update the local store accordingly.
  * @param event - Raw Soroban contract event from the RPC
  */
@@ -174,7 +189,7 @@ function handleEvent(event: SorobanRpc.Api.RawEventResponse): void {
       const vals = ((xdr.ScVal.fromXDR(event.value, "base64") as any).vec?.() ?? []) as any[];
       if (vals.length < 3) return;
       const id = vals[0].u64?.().toString() ?? "";
-      const borrower = (() => { try { return Address.fromScVal(vals[1]).toString(); } catch { return ""; } })();
+      const borrower = decodeAccountAddress(vals[1]);
       const amount = Number(vals[2].i128?.().lo ?? 0);
       insertLoan({ id, borrower, collateral_id: "", amount });
       logEvent("contract.event.loan_synced", event, {
@@ -197,84 +212,6 @@ function handleEvent(event: SorobanRpc.Api.RawEventResponse): void {
       const vals = ((xdr.ScVal.fromXDR(event.value, "base64") as any).vec?.() ?? []) as any[];
       if (vals.length < 3) return;
       const id = vals[0].u64?.().toString() ?? "";
-      const liquidator = (() => { try { return Address.fromScVal(vals[1]).toString(); } catch { return ""; } })();
-      const repayAmount = Number(vals[2].i128?.().lo ?? 0);
-      updateLoan(id, { status: "liquidated" });
-      insertLiquidationEvent({ loan_id: id, liquidator, repay_amount: repayAmount });
-      logEvent("contract.event.loan_liquidated_synced", event, { id, liquidator, repayAmount });
-    }
-  } catch (err) {
-    logEvent("contract.event.processing_failed", event, undefined, err as Error);
-  }
-}
+      const liquidator = (() => { 
 
-/**
- * Fetch and process new contract events since the last processed ledger.
- * Uses the shared rpcClient so calls are wrapped by the circuit breaker and
- * respect its open/closed state.
- */
-async function pollEvents(): Promise<void> {
-  const contractId = getContractId();
-  if (!contractId) {
-    logger.warn("contract_event_listener", { message: "CONTRACT_ID not set; skipping poll" });
-    return;
-  }
-
-  // Respect the circuit breaker: skip polling while the RPC circuit is open.
-  if (!rpcClient.isHealthy()) {
-    logger.warn("contract_event_listener", { message: "RPC circuit open; skipping event poll" });
-    return;
-  }
-
-  try {
-    const startLedger = lastLedger > 0 ? lastLedger + 1 : (await getLedgerCursor()) + 1;
-    const response = await rpcClient.getEvents({
-      startLedger,
-      filters: [{ type: "contract", contractIds: [contractId] }],
-    });
-
-    for (const event of response.events ?? []) {
-      handleEvent(event);
-      lastLedger = Math.max(lastLedger, safeLedger(event.ledger));
-    }
-
-    if (lastLedger > 0) {
-      await setLedgerCursor(lastLedger);
-    }
-  } catch (err) {
-    logger.error("contract_event_listener", {
-      message: "event poll failed",
-      error: (err as Error).message,
-    });
-  }
-}
-
-/**
- * Schedule the next poll iteration.
- */
-function scheduleNext(): void {
-  pollTimer = setTimeout(async () => {
-    await pollEvents();
-    scheduleNext();
-  }, POLL_INTERVAL_MS);
-}
-
-/**
- * Start the contract event listener polling loop.
- */
-export function startContractEventListener(): void {
-  if (pollTimer) return;
-  logger.info("contract_event_listener", { message: "starting contract event listener" });
-  void pollEvents();
-  scheduleNext();
-}
-
-/**
- * Stop the contract event listener polling loop.
- */
-export function stopContractEventListener(): void {
-  if (pollTimer) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-  }
-}
+/* … truncated 2376 chars — edit only what you need near the top … */
