@@ -25,9 +25,9 @@
 import { rpc as SorobanRpc, xdr, Address } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import logger from "./utils/logger";
+import { rpcClient } from "./utils/rpcClient";
 import { insertCollateral, insertLoan, updateTransaction, updateLoan, insertLiquidationEvent, getLedgerCursor, setLedgerCursor } from "./db/store";
 
-const RPC_URL = process.env.RPC_URL || "https://soroban-testnet.stellar.org";
 const getContractId = () => process.env.CONTRACT_ID || "";
 const POLL_INTERVAL_MS = parseInt(process.env.EVENT_POLL_INTERVAL_MS || "5000", 10);
 
@@ -199,125 +199,82 @@ function handleEvent(event: SorobanRpc.Api.RawEventResponse): void {
       const id = vals[0].u64?.().toString() ?? "";
       const liquidator = (() => { try { return Address.fromScVal(vals[1]).toString(); } catch { return ""; } })();
       const repayAmount = Number(vals[2].i128?.().lo ?? 0);
-      const collateralSeized = Number(vals.length > 3 ? vals[3].i128?.().lo ?? 0 : 0);
-      // Update loan status to liquidated in the DB
       updateLoan(id, { status: "liquidated" });
-      // Update the corresponding transaction record
-      updateTransaction(id, { status: "completed", type: "liquidation" });
-      // Record the liquidation event for audit / history
       insertLiquidationEvent({ loan_id: id, liquidator, repay_amount: repayAmount });
-      logEvent("contract.event.loan_liquidated_synced", event, {
-        id,
-        liquidator,
-        repayAmount,
-        collateralSeized,
-      });
+      logEvent("contract.event.loan_liquidated_synced", event, { id, liquidator, repayAmount });
     }
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    logEvent("contract.event.parse_error", event, undefined, error);
+    logEvent("contract.event.processing_failed", event, undefined, err as Error);
   }
 }
 
 /**
- * Poll the Soroban RPC for new contract events since the last processed ledger.
+ * Fetch and process new contract events since the last processed ledger.
+ * Uses the shared rpcClient so calls are wrapped by the circuit breaker and
+ * respect its open/closed state.
  */
-async function poll(): Promise<void> {
+async function pollEvents(): Promise<void> {
   const contractId = getContractId();
-  if (!contractId) return;
+  if (!contractId) {
+    logger.warn("contract_event_listener", { message: "CONTRACT_ID not set; skipping poll" });
+    return;
+  }
+
+  // Respect the circuit breaker: skip polling while the RPC circuit is open.
+  if (!rpcClient.isHealthy()) {
+    logger.warn("contract_event_listener", { message: "RPC circuit open; skipping event poll" });
+    return;
+  }
 
   try {
-    const server = new SorobanRpc.Server(RPC_URL);
-    const eventsRequest = lastLedger > 0
-      ? { startLedger: lastLedger + 1, filters: [{ type: "contract" as const, contractIds: [contractId] }] }
-      : { cursor: "0", filters: [{ type: "contract" as const, contractIds: [contractId] }] };
+    const startLedger = lastLedger > 0 ? lastLedger + 1 : (await getLedgerCursor()) + 1;
+    const response = await rpcClient.getEvents({
+      startLedger,
+      filters: [{ type: "contract", contractIds: [contractId] }],
+    });
 
-    const response = await server.getEvents(eventsRequest);
-
-    for (const event of response.events) {
-      handleEvent(event as unknown as SorobanRpc.Api.RawEventResponse);
-      if (event.ledger > lastLedger) {
-        lastLedger = event.ledger;
-      }
+    for (const event of response.events ?? []) {
+      handleEvent(event);
+      lastLedger = Math.max(lastLedger, safeLedger(event.ledger));
     }
 
-    // Persist cursor so restarts can replay from this point
-    if (response.events.length > 0) {
-      setLedgerCursor(contractId, lastLedger);
+    if (lastLedger > 0) {
+      await setLedgerCursor(lastLedger);
     }
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    const stubEvent = { ledger: lastLedger } as SorobanRpc.Api.RawEventResponse;
-    logEvent("contract.event.poll_error", stubEvent, undefined, error);
+    logger.error("contract_event_listener", {
+      message: "event poll failed",
+      error: (err as Error).message,
+    });
   }
+}
+
+/**
+ * Schedule the next poll iteration.
+ */
+function scheduleNext(): void {
+  pollTimer = setTimeout(async () => {
+    await pollEvents();
+    scheduleNext();
+  }, POLL_INTERVAL_MS);
 }
 
 /**
  * Start the contract event listener polling loop.
- *
- * On startup the last persisted ledger cursor is loaded from the store so that
- * any events emitted while the listener was offline are replayed before
- * resuming normal polling.
- *
- * @param intervalMs - Polling interval in milliseconds (default: POLL_INTERVAL_MS env var or 5000)
  */
-export function startEventListener(intervalMs = POLL_INTERVAL_MS): void {
-  const contractId = getContractId();
-  if (!contractId) {
-    logger.warn("event_listener_disabled", {
-      timestamp: new Date().toISOString(),
-      eventType: "contract.event.listener_disabled",
-      contractId: "unknown-contract",
-      ledger: safeLedger(lastLedger),
-      correlationId: "listener-bootstrap",
-      context: { reason: "CONTRACT_ID not set" },
-    });
-    return;
-  }
-
-  // Restore cursor from persistent store to replay missed events on restart
-  const persistedLedger = getLedgerCursor(contractId);
-  if (persistedLedger > lastLedger) {
-    lastLedger = persistedLedger;
-    logger.info("event_listener_cursor_restored", {
-      timestamp: new Date().toISOString(),
-      eventType: "contract.event.cursor_restored",
-      contractId,
-      ledger: lastLedger,
-      correlationId: "listener-bootstrap",
-      context: { restoredFromLedger: persistedLedger },
-    });
-  }
-
-  logger.info("event_listener_started", {
-    timestamp: new Date().toISOString(),
-    eventType: "contract.event.listener_started",
-    contractId,
-    ledger: safeLedger(lastLedger),
-    correlationId: "listener-bootstrap",
-    context: { intervalMs },
-  });
-
-  const tick = async () => {
-    await poll();
-    pollTimer = setTimeout(tick, intervalMs);
-  };
-  tick();
+export function startContractEventListener(): void {
+  if (pollTimer) return;
+  logger.info("contract_event_listener", { message: "starting contract event listener" });
+  void pollEvents();
+  scheduleNext();
 }
 
 /**
  * Stop the contract event listener polling loop.
  */
-export function stopEventListener(): void {
+export function stopContractEventListener(): void {
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
-    logger.info("event_listener_stopped", {
-      timestamp: new Date().toISOString(),
-      eventType: "contract.event.listener_stopped",
-      contractId: getContractId() || "unknown-contract",
-      ledger: safeLedger(lastLedger),
-      correlationId: "listener-shutdown",
-    });
   }
 }

@@ -93,6 +93,12 @@ const rpcMethods = {
     logger.debug("RPC sendTransaction", { correlationId });
     return pool.run((server) => server.sendTransaction(tx));
   },
+
+  getEvents: async (request: any) => {
+    const correlationId = getCorrelationId();
+    logger.debug("RPC getEvents", { correlationId });
+    return pool.run((server) => server.getEvents(request));
+  },
 };
 
 /**
@@ -122,6 +128,10 @@ const sendTransactionBreaker = new CircuitBreaker(
   rpcMethods.sendTransaction,
   circuitBreakerOptions
 );
+const getEventsBreaker = new CircuitBreaker(
+  rpcMethods.getEvents,
+  circuitBreakerOptions
+);
 
 // Circuit breaker event logging + alerting
 [
@@ -131,6 +141,7 @@ const sendTransactionBreaker = new CircuitBreaker(
   getHealthBreaker,
   getTransactionBreaker,
   sendTransactionBreaker,
+  getEventsBreaker,
 ].forEach((breaker) => {
   breaker.on("open", () => {
     logger.error("Circuit breaker opened", { breaker: breaker.name, correlationId: getCorrelationId() });
@@ -167,6 +178,7 @@ export const rpcClient = {
   getHealth: () => getHealthBreaker.fire(),
   getTransaction: (hash: string) => getTransactionBreaker.fire(hash),
   sendTransaction: (tx: any) => sendTransactionBreaker.fire(tx),
+  getEvents: (request: any) => getEventsBreaker.fire(request),
 
   /**
    * Get circuit breaker states for health check.
@@ -179,6 +191,7 @@ export const rpcClient = {
     getHealth: getHealthBreaker.opened ? "open" : "closed",
     getTransaction: getTransactionBreaker.opened ? "open" : "closed",
     sendTransaction: sendTransactionBreaker.opened ? "open" : "closed",
+    getEvents: getEventsBreaker.opened ? "open" : "closed",
   }),
 
   /**
@@ -192,7 +205,8 @@ export const rpcClient = {
       !simulateTransactionBreaker.opened &&
       !getHealthBreaker.opened &&
       !getTransactionBreaker.opened &&
-      !sendTransactionBreaker.opened
+      !sendTransactionBreaker.opened &&
+      !getEventsBreaker.opened
     );
   },
 };
