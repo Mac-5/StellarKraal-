@@ -29,8 +29,9 @@
  * ```
  */
 
-import { ReactNode, type MouseEventHandler } from "react";
-import { cn } from "@/lib/utils";
+import { ReactNode, type MouseEventHandler } from 'react';
+import { cn } from '@/lib/utils';
+import ScrollableTable from './ScrollableTable';
 
 // ── Table wrapper ──────────────────────────────────────────────────────────────
 
@@ -44,18 +45,11 @@ interface AdminTableProps {
   className?: string;
 }
 
-export function AdminTable({
-  columns,
-  children,
-  caption,
-  className,
-}: AdminTableProps) {
+export function AdminTable({ columns, children, caption, className }: AdminTableProps) {
   return (
-    <div className={cn("overflow-x-auto", className)}>
+    <ScrollableTable label={caption ?? 'Table'} className={className}>
       <table className="w-full text-sm border-collapse">
-        {caption && (
-          <caption className="sr-only">{caption}</caption>
-        )}
+        {caption && <caption className="sr-only">{caption}</caption>}
         <thead className="bg-brown/5 dark:bg-cream/5 border-b border-brown/10 dark:border-cream/10">
           <tr>
             {columns.map((col) => (
@@ -69,11 +63,9 @@ export function AdminTable({
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-brown/5 dark:divide-cream/5">
-          {children}
-        </tbody>
+        <tbody className="divide-y divide-brown/5 dark:divide-cream/5">{children}</tbody>
       </table>
-    </div>
+    </ScrollableTable>
   );
 }
 
@@ -95,17 +87,12 @@ interface AdminTableRowProps {
  * - Pressed state on click
  * - `role="button"` + `tabIndex` + keyboard Enter/Space when `onClick` is set
  */
-export function AdminTableRow({
-  index,
-  onClick,
-  children,
-  className,
-}: AdminTableRowProps) {
+export function AdminTableRow({ index, onClick, children, className }: AdminTableRowProps) {
   const isEven = index % 2 === 0;
   const isInteractive = !!onClick;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTableRowElement>) => {
-    if (isInteractive && (e.key === "Enter" || e.key === " ")) {
+    if (isInteractive && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       onClick?.(e as unknown as React.MouseEvent<HTMLTableRowElement>);
     }
@@ -113,26 +100,25 @@ export function AdminTableRow({
 
   return (
     <tr
-      role={isInteractive ? "button" : undefined}
+      role={isInteractive ? 'button' : undefined}
       tabIndex={isInteractive ? 0 : undefined}
       onClick={onClick}
       onKeyDown={isInteractive ? handleKeyDown : undefined}
       className={cn(
         // ── Zebra stripe ───────────────────────────────────────────────────────
-        isEven
-          ? "bg-brown/[0.04] dark:bg-cream/[0.04]"
-          : "bg-transparent",
+        isEven ? 'bg-brown/[0.04] dark:bg-cream/[0.04]' : 'bg-transparent',
 
         // ── Hover highlight ────────────────────────────────────────────────────
-        "hover:bg-gold/10 dark:hover:bg-gold/10 transition-colors duration-100",
+        'hover:bg-gold/10 dark:hover:bg-gold/10 transition-colors duration-100',
 
         // ── Pressed / active state ─────────────────────────────────────────────
-        isInteractive && [
-          "cursor-pointer",
-          "active:bg-gold/20 dark:active:bg-gold/20",
-          "focus-visible:outline-none focus-visible:ring-2",
-          "focus-visible:ring-inset focus-visible:ring-gold-500",
-        ],
+        isInteractive &&
+          [
+            'cursor-pointer',
+            'active:bg-gold/20 dark:active:bg-gold/20',
+            'focus-visible:outline-none focus-visible:ring-2',
+            'focus-visible:ring-inset focus-visible:ring-gold-500',
+          ].join(' '),
 
         className
       )}
@@ -151,13 +137,6 @@ interface AdminTableCellProps {
 
 export function AdminTableCell({ children, className }: AdminTableCellProps) {
   return (
-    <td
-      className={cn(
-        "px-4 py-3 text-brown-700 dark:text-cream-200",
-        className
-      )}
-    >
-      {children}
-    </td>
+    <td className={cn('px-4 py-3 text-brown-700 dark:text-cream-200', className)}>{children}</td>
   );
 }

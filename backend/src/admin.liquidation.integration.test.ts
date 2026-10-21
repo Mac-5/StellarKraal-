@@ -48,6 +48,7 @@ jest.mock('@stellar/stellar-sdk', () => ({
 jest.mock('./jobs/healthFactorJob', () => ({
   scheduleHealthFactorJob: jest.fn(() => ({ stop: jest.fn() })),
   runHealthFactorJob: jest.fn().mockResolvedValue(3),
+  evaluateHealthFactors: jest.fn().mockResolvedValue({ updated: 0, candidates: [] }),
 }));
 
 jest.mock('./jobs/repaymentReminderJob', () => ({
@@ -102,5 +103,43 @@ describe('POST /api/v1/admin/liquidation-check', () => {
     // Timestamp must be a valid date within the last 5 seconds
     expect(Number.isFinite(ts)).toBe(true);
     expect(Date.now() - ts).toBeLessThan(5_000);
+  });
+});
+
+describe('POST /api/v1/admin/liquidation/check', () => {
+  beforeEach(() => {
+    testUser = { publicKey: ADMIN_KEY, role: 'admin' };
+    jest.clearAllMocks();
+    const { evaluateHealthFactors } = require('./jobs/healthFactorJob');
+    (evaluateHealthFactors as jest.Mock).mockResolvedValue({
+      updated: 0,
+      candidates: [{ id: 'loan-at-risk', health_factor: 9_500, status: 'at_risk' }],
+    });
+  });
+
+  it('requires the admin role claim', async () => {
+    testUser = { publicKey: ADMIN_KEY, role: 'user' };
+    const res = await request(app).post('/api/v1/admin/liquidation/check');
+    expect(res.status).toBe(403);
+  });
+
+  it('returns liquidation candidates and evaluates in read-only mode for dry runs', async () => {
+    const { evaluateHealthFactors } = require('./jobs/healthFactorJob');
+    const res = await request(app).post('/api/v1/admin/liquidation/check?dryRun=true');
+    expect(res.status).toBe(200);
+    expect(res.body.dryRun).toBe(true);
+    expect(res.body.loans).toHaveLength(1);
+    expect(evaluateHealthFactors).toHaveBeenCalledWith({ applyUpdates: false });
+  });
+
+  it('records an audit entry and applies evaluation updates by default', async () => {
+    const { evaluateHealthFactors } = require('./jobs/healthFactorJob');
+    const { listAuditEntries } = require('./db/store');
+    const before = listAuditEntries({ action: 'liquidation.check' }).total;
+    const res = await request(app).post('/api/v1/admin/liquidation/check');
+    expect(res.status).toBe(200);
+    expect(res.body.dryRun).toBe(false);
+    expect(evaluateHealthFactors).toHaveBeenCalledWith({ applyUpdates: true });
+    expect(listAuditEntries({ action: 'liquidation.check' }).total).toBe(before + 1);
   });
 });

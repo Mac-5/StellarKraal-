@@ -1,11 +1,19 @@
 {
   "dev": {
     "driver": "sqlite3",
-    "filename": "./dev.sqlite3"
+    "filename": "./dev.sqlite3",
+    "migrations": {
+      "directory": "./migrations",
+      "tableName": "knex_migrations"
+    }
   },
   "test": {
     "driver": "sqlite3",
-    "filename": ":memory:"
+    "filename": ":memory:",
+    "migrations": {
+      "directory": "./migrations",
+      "tableName": "knex_migrations"
+    }
   },
   "production": {
     "driver": "pg",
@@ -14,11 +22,19 @@
     "database": { "ENV": "DB_NAME" },
     "user": { "ENV": "DB_USER" },
     "password": { "ENV": "DB_PASSWORD" },
-    "pool": { "max": 10, "min": 1 }
+    "pool": { "max": 10, "min": 1 },
+    "migrations": {
+      "directory": "./migrations",
+      "tableName": "knex_migrations"
+    }
   },
   "staging": {
     "driver": "pg",
     "url": { "ENV": "DATABASE_URL" },
-    "pool": { "max": 10, "min": 1 }
+    "pool": { "max": 10, "min": 1 },
+    "migrations": {
+      "directory": "./migrations",
+      "tableName": "knex_migrations"
+    }
   }
 }

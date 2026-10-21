@@ -14,12 +14,48 @@ import logger from "../utils/logger";
 /** Minimum free disk bytes before reporting degraded (500 MB) */
 const DISK_MIN_FREE_BYTES = 500 * 1024 * 1024;
 
+/** Per-component timeout for the aggregated /health check (ms) */
+const COMPONENT_TIMEOUT_MS = 3000;
+
 type ComponentStatus = "ok" | "degraded";
 
 interface DeepHealthResponse {
   db: ComponentStatus;
   rpc: ComponentStatus;
   disk: ComponentStatus;
+}
+
+type AggregatedStatus = "healthy" | "degraded" | "unhealthy";
+
+interface HealthResponse {
+  status: AggregatedStatus;
+  components: {
+    db: ComponentStatus;
+    rpc: ComponentStatus;
+    eventListener: ComponentStatus;
+  };
+}
+
+/**
+ * Run a health check with a timeout so a hanging dependency cannot block the
+ * response. Resolves to `true` when the check succeeds within the timeout.
+ */
+async function withTimeout(
+  check: () => Promise<boolean>,
+  timeoutMs: number = COMPONENT_TIMEOUT_MS
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      check().catch(() => false),
+      timeout,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -60,7 +96,66 @@ async function checkDiskHealth(): Promise<boolean> {
   });
 }
 
+/**
+ * Check whether the event listener is running. The listener module exposes an
+ * optional `isRunning` helper; when unavailable we treat it as degraded.
+ */
+async function checkEventListenerHealth(): Promise<boolean> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const listener = require("../services/eventListener");
+    if (typeof listener.isRunning === "function") {
+      return Boolean(listener.isRunning());
+    }
+    if (typeof listener.getStatus === "function") {
+      return listener.getStatus() === "running";
+    }
+    return false;
+  } catch (err) {
+    logger.warn("event listener health check failed", {
+      error: (err as Error).message,
+    });
+    return false;
+  }
+}
+
 const healthRouter = Router();
+
+/**
+ * GET /health
+ *
+ * Aggregated health check for Docker / ECS health probes. Reports the status
+ * of all critical dependencies with a per-component timeout.
+ *
+ * @returns 200 `{ status: "healthy", components: { db, rpc, eventListener } }`
+ * @returns 503 `{ status: "degraded" | "unhealthy", components }`
+ */
+healthRouter.get("/", async (_req: Request, res: Response) => {
+  const [dbHealthy, rpcHealthy, listenerHealthy] = await Promise.all([
+    withTimeout(checkDbHealth),
+    withTimeout(() => rpcClient.getHealth().then(() => true).catch(() => false)),
+    withTimeout(checkEventListenerHealth),
+  ]);
+
+  const components = {
+    db: (dbHealthy ? "ok" : "degraded") as ComponentStatus,
+    rpc: (rpcHealthy ? "ok" : "degraded") as ComponentStatus,
+    eventListener: (listenerHealthy ? "ok" : "degraded") as ComponentStatus,
+  };
+
+  const healthyCount = [dbHealthy, rpcHealthy, listenerHealthy].filter(Boolean).length;
+  let status: AggregatedStatus;
+  if (healthyCount === 3) {
+    status = "healthy";
+  } else if (healthyCount === 0) {
+    status = "unhealthy";
+  } else {
+    status = "degraded";
+  }
+
+  const body: HealthResponse = { status, components };
+  res.status(status === "healthy" ? 200 : 503).json(body);
+});
 
 /**
  * GET /health/live
@@ -124,23 +219,6 @@ healthRouter.get("/deep", async (_req: Request, res: Response) => {
 
   const allHealthy = dbHealthy && rpcHealthy && diskHealthy;
   res.status(allHealthy ? 200 : 503).json(body);
-});
-
-/**
- * GET /health/live
- * Kubernetes-style liveness probe. Returns 200 if the process is alive.
- */
-healthRouter.get("/live", (_req: Request, res: Response) => {
-  res.status(200).json({ status: "alive" });
-});
-
-/**
- * GET /health/ready
- * Kubernetes-style readiness probe. Returns 200 only when the DB is reachable.
- */
-healthRouter.get("/ready", async (_req: Request, res: Response) => {
-  const dbHealthy = await checkDbHealth();
-  res.status(dbHealthy ? 200 : 503).json({ status: dbHealthy ? "ready" : "not_ready" });
 });
 
 export { healthRouter, checkDiskHealth };

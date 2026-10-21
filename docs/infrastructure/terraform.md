@@ -235,6 +235,31 @@ terraform apply backup.tfplan
 rm -f backup.tfplan
 ```
 
+#### ECS & RDS health alarms (`terraform/monitoring.tf`)
+
+All alarms publish to the `stellarkraal-ops-alerts-<env>` SNS topic (output `ops_alerts_sns_topic_arn`). AWS Chatbot forwards that topic to the on-call Slack channel.
+
+| Alarm | Metric | Fires when | Variable |
+|-------|--------|------------|----------|
+| `ecs-cpu-high` | `AWS/ECS CPUUtilization` | > 80% for 2 × 5 min | `ecs_cpu_threshold` |
+| `ecs-memory-high` | `AWS/ECS MemoryUtilization` | > 80% for 2 × 5 min | `ecs_memory_threshold` |
+| `rds-free-storage-low` | `AWS/RDS FreeStorageSpace` | < 2 GB | `rds_free_storage_threshold_gb` |
+| `rds-connections-high` | `AWS/RDS DatabaseConnections` | > 80 for 2 × 5 min | `rds_max_connections_threshold` |
+| `backend-5xx-rate-high` | `HTTPCode_Target_5XX_Count / RequestCount` | > 1% for 2 × 5 min | `backend_5xx_rate_threshold` |
+
+Extra inputs:
+
+- `alb_arn_suffix`: ARN suffix of the backend ALB (e.g. `app/stellarkraal-alb/abc123`). The 5xx alarm is only created when this is set.
+- `slack_team_id` and `slack_oncall_channel_id`: Slack workspace and on-call channel IDs. Authorize the Slack workspace in the AWS Chatbot console once before applying. Slack delivery is only created when both are set.
+
+```bash
+terraform plan \
+  -var="alb_arn_suffix=app/stellarkraal-alb/abc123" \
+  -var="slack_team_id=T0123456789" \
+  -var="slack_oncall_channel_id=C0123456789" \
+  ...
+```
+
 ---
 
 ## State Management & Operations

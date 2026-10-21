@@ -39,3 +39,26 @@ variable "slack_webhook_url" {
   sensitive   = true
   default     = ""
 }
+
+variable "backup_bucket_name" {
+  description = "Name of the S3 bucket used to store backups"
+  type        = string
+}
+
+variable "backup_transition_days" {
+  description = "Number of days before backup objects transition to STANDARD_IA"
+  type        = number
+  default     = 30
+}
+
+variable "backup_expiration_days" {
+  description = "Number of days before backup objects expire"
+  type        = number
+  default     = 90
+}
+
+variable "backup_kms_key_arn" {
+  description = "Optional KMS key ARN for S3 server-side encryption; when empty, AES-256 (SSE-S3) is used"
+  type        = string
+  default     = ""
+}

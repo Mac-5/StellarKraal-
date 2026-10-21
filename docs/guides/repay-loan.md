@@ -78,20 +78,115 @@ HF = (total_collateral_value × 8000) / (outstanding × 10_000) × 10_000
 
 HF is expressed in basis points scaled by 10,000 — a value of 10,000 equals 1.0. See [Liquidation Mechanism](../protocol/liquidation.md) for the full technical specification.
 
+### Fully Worked Calculator Example
+
+This walkthrough uses a realistic 30-day loan and shows every number you would see in the app.
+
+**Loan terms**
+
+| Parameter | Value |
+|-----------|-------|
+| Principal borrowed | 5,000,000 stroops (0.5 XLM) |
+| Origination fee (1%) | 50,000 stroops |
+| Outstanding at origination | 5,050,000 stroops |
+| Collateral deposited | 8,000,000 stroops |
+| Collateral factor | 0.80 |
+| Term | 30 days |
+
+**Step 1 — Health factor at origination**
+
+```
+HF = (8,000,000 × 0.80) / 5,050,000
+   = 6,400,000 / 5,050,000
+   = 1.27
+```
+
+**Step 2 — Collateral price drops 20%** (collateral now worth 6,400,000 stroops)
+
+```
+HF = (6,400,000 × 0.80) / 5,050,000
+   = 5,120,000 / 5,050,000
+   = 1.01  ⚠️ close to liquidation
+```
+
+**Step 3 — You repay 2,000,000 stroops**
+
+```
+New outstanding = 5,050,000 − 2,000,000 = 3,050,000
+HF = (6,400,000 × 0.80) / 3,050,000
+   = 5,120,000 / 3,050,000
+   = 1.68  ✅ back in the safe zone
+```
+
+**Step 4 — You repay the remaining 3,050,000 stroops**
+
+```
+New outstanding = 0 → loan status becomes Repaid
+Collateral (8,000,000 stroops) is released back to your wallet
+```
+
+> **Tip:** To estimate the repayment needed to reach a target health factor, rearrange the formula:  
+> `required repayment = outstanding − (collateral value × 0.80 / target HF)`.
+
 ---
 
 ## Repayment Deadlines
 
 > **Note:** Automatic deadline enforcement (i.e., marking a loan defaulted if not repaid by the term end date) is planned but not yet implemented in the current contract version. This section will be updated when the feature ships.
 
-What you can rely on today:
+### How the deadline is calculated
 
 - Each loan has a term (7, 30, 90, or 180 days) set at origination.
-- The backend records the due date and it is displayed on the Loans page.
+- The due date is computed as `origination_timestamp + term_days × 86,400` seconds.
+- The backend records this due date when the loan is created and exposes it to the frontend.
+
+### How the deadline is displayed in the UI
+
+- The **Loans** page shows the due date on each loan card, alongside the outstanding balance.
+- A countdown badge shows the remaining days until the due date.
+- When fewer than **7 days** remain, the badge turns amber and reads **"Due soon"**.
+- When the due date has passed, the badge turns red and reads **"Past due"**.
+
+### What you can rely on today
+
 - If you do not repay before the due date, the loan remains **Active** but may become eligible for liquidation if the health factor drops below 1.0 in the interim.
 - The origination fee is charged at loan creation, not at repayment time — it is already baked into the outstanding balance.
 
 **Best practice:** Set a reminder a few days before your loan's due date and ensure you have enough funds to repay in full.
+
+---
+
+## ⚠️ Warning: Missing a Repayment Deadline
+
+Failing to repay before your loan's due date has real consequences:
+
+- **Liquidation risk increases.** A past-due loan that also falls below a health factor of 1.0 becomes eligible for liquidation, and your collateral can be seized to cover the debt.
+- **Collateral loss.** If liquidated, you lose the collateral backing the loan — potentially more than the outstanding balance once penalties are applied.
+- **No automatic grace period.** The current contract does not pause or extend deadlines; the due date is fixed at origination.
+- **Credit/reputation impact.** Repeatedly missing deadlines may affect your ability to borrow in future versions of the protocol.
+
+**To avoid these outcomes:**
+
+1. Repay in full before the due date shown on the Loans page.
+2. If you cannot repay in full, make a partial repayment to keep your health factor safely above 1.0.
+3. Monitor the countdown badge and act as soon as it turns amber ("Due soon").
+
+---
+
+## Repayment Flow in the App
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  Loans page  │───▶│  Repay Panel │───▶│  Freighter   │───▶│  Confirmation│
+│  (click      │    │  (enter Loan │    │  (review &   │    │  toast +     │
+│   Repay)     │    │   ID + amt)  │    │   approve)   │    │  card refresh│
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+```
+
+1. **Loans page** — locate the loan and click **Repay**.
+2. **Repay Panel** — enter the Loan ID and amount in stroops.
+3. **Freighter** — review the transaction details and approve.
+4. **Confirmation** — a toast confirms success; the loan card refreshes with the new balance or **Repaid** status.
 
 ---
 
@@ -142,6 +237,9 @@ Once outstanding reaches 0, the loan transitions to **Repaid** and the collatera
 
 **Q: I want to repay ahead of schedule. Is there a prepayment penalty?**  
 No. You can repay at any time with no penalty. Early full repayment frees your collateral immediately.
+
+**Q: What happens if I miss my repayment deadline?**  
+The loan stays **Active** but is flagged **Past due** in the UI. If your health factor also drops below 1.0, the position becomes eligible for liquidation and your collateral can be seized. See the warning section above.
 
 ---
 

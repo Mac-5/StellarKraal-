@@ -7,6 +7,10 @@ interface EmptyStateProps {
   ctaLabel?: string;
   onCta?: () => void;
   icon?: string;
+  /** When true, renders a secondary "Clear filters" action for filtered/searched results. */
+  isFiltered?: boolean;
+  onClearFilters?: () => void;
+  clearFiltersLabel?: string;
 }
 
 export default function EmptyState({
@@ -16,6 +20,9 @@ export default function EmptyState({
   ctaLabel,
   onCta,
   icon,
+  isFiltered,
+  onClearFilters,
+  clearFiltersLabel = 'Clear filters',
 }: EmptyStateProps) {
   return (
     <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
@@ -34,15 +41,28 @@ export default function EmptyState({
         {message}
       </p>
 
-      {/* CTA Button */}
-      {ctaLabel && onCta && (
-        <button
-          onClick={onCta}
-          className="bg-gold text-brown px-6 py-2.5 rounded-xl font-semibold hover:bg-gold/80 transition focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2"
-        >
-          {ctaLabel}
-        </button>
-      )}
+      {/* Actions */}
+      <div className="flex flex-col sm:flex-row items-center gap-3">
+        {/* Primary CTA Button */}
+        {ctaLabel && onCta && (
+          <button
+            onClick={onCta}
+            className="bg-gold text-brown px-6 py-2.5 rounded-xl font-semibold hover:bg-gold/80 transition focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2"
+          >
+            {ctaLabel}
+          </button>
+        )}
+
+        {/* Clear filters action for filtered/searched results */}
+        {isFiltered && onClearFilters && (
+          <button
+            onClick={onClearFilters}
+            className="bg-transparent text-brown px-6 py-2.5 rounded-xl font-semibold border border-brown/30 hover:bg-brown/5 transition focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2"
+          >
+            {clearFiltersLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

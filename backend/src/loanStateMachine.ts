@@ -1,3 +1,5 @@
+import logger from "./utils/logger";
+
 export type LoanStatus = "pending" | "active" | "repaid" | "liquidated" | "at_risk";
 
 export type TransitionTrigger = "job" | "api" | "liquidation";
@@ -27,6 +29,35 @@ export interface TransitionOptions {
   loanId?: string;
   /** What initiated the transition (job/api/liquidation). */
   triggeredBy?: TransitionTrigger;
+}
+
+export interface TransitionLogContext {
+  loanId?: string;
+  triggeredBy?: string;
+}
+
+const SAFE_TRIGGER_SOURCES = new Set(["system", "scheduler", "admin", "user", "api", "liquidation"]);
+
+function safeTriggeredBy(triggeredBy?: string): string {
+  if (triggeredBy && SAFE_TRIGGER_SOURCES.has(triggeredBy)) return triggeredBy;
+  return "system";
+}
+
+/** Log a state transition without emitting wallet addresses or other actor PII. */
+export function logLoanStateTransition(fields: {
+  loanId: string;
+  fromState: string;
+  toState: string;
+  triggeredBy?: string;
+  timestamp: string;
+}): void {
+  logger.info("loan_state_transition", {
+    loanId: fields.loanId,
+    fromState: fields.fromState,
+    toState: fields.toState,
+    triggeredBy: safeTriggeredBy(fields.triggeredBy),
+    timestamp: fields.timestamp,
+  });
 }
 
 export class InvalidTransitionError extends Error {
@@ -69,25 +100,20 @@ export async function transition(
   current: LoanStatus,
   next: LoanStatus,
   history: TransitionRecord[],
-  options: TransitionOptions = {}
-): Promise<LoanStatus> {
+  context: TransitionLogContext = {}
+): LoanStatus {
   if (!TRANSITIONS[current].includes(next)) {
     throw new InvalidTransitionError(current, next);
   }
-
-  const at = new Date().toISOString();
-  const triggeredBy = options.triggeredBy ?? "api";
-
-  if (options.db && options.loanId) {
-    await options.db.query(
-      `INSERT INTO loan_transitions
-         (loan_id, from_status, to_status, transitioned_at, triggered_by)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [options.loanId, current, next, at, triggeredBy]
-    );
-  }
-
-  history.push({ from: current, to: next, at, triggeredBy });
+  const timestamp = new Date().toISOString();
+  history.push({ from: current, to: next, at: timestamp });
+  logLoanStateTransition({
+    loanId: context.loanId ?? "unknown",
+    fromState: current,
+    toState: next,
+    triggeredBy: context.triggeredBy,
+    timestamp,
+  });
   return next;
 }
 

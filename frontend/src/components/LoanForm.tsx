@@ -7,10 +7,19 @@ import Spinner from '@/components/Spinner';
 import { useToast } from '@/components/toast';
 import { Input, Select, ErrorSummary, toSummaryErrors } from '@/components/ui';
 import FieldTooltip from '@/components/FieldTooltip';
+import FormSuccess from '@/components/FormSuccess';
+import {
+  LIMITS,
+  fmt,
+  validateAppraisedValue,
+  validateCollateralId,
+  validateCount,
+  validateLoanAmount,
+} from '@/lib/loanFormValidation';
 import { useFetchWithRateLimit } from '@/hooks/useFetchWithRateLimit';
 import { useNetworkMismatch } from '@/hooks/useNetworkMismatch';
 import { useNetworkStatus } from '@/hooks/useNetworkStatus';
-import { useTransactionStatus } from '@/hooks/useTransactionStatus';
+import { useTransactionStatus, type TransactionStatus } from '@/hooks/useTransactionStatus';
 import { throwIfNotOk } from '@/lib/api';
 import { classifyApiError } from '@/lib/apiErrorToast';
 
@@ -32,37 +41,7 @@ const LOAN_FIELD_IDS = {
   loanAmount: 'loan-amount',
 };
 
-function validateCount(v: string): string | null {
-  if (!v.trim()) return 'Count is required.';
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 1) return 'Count must be a whole number of at least 1.';
-  if (n > 10_000) return 'Count cannot exceed 10,000.';
-  return null;
-}
-
-function validateAppraisedValue(v: string): string | null {
-  if (!v.trim()) return 'Appraised value is required.';
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return 'Appraised value must be a positive number.';
-  if (!Number.isInteger(n)) return 'Appraised value must be a whole number of stroops.';
-  return null;
-}
-
-function validateCollateralId(v: string): string | null {
-  if (!v.trim()) return 'Collateral ID is required.';
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 1) return 'Collateral ID must be a positive integer.';
-  return null;
-}
-
-function validateLoanAmount(v: string): string | null {
-  if (!v.trim()) return 'Loan amount is required.';
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return 'Loan amount must be a positive number.';
-  if (!Number.isInteger(n)) return 'Loan amount must be a whole number of stroops.';
-  if (n < 1_000) return 'Loan amount must be at least 1,000 stroops.';
-  return null;
-}
+type FieldName = 'count' | 'appraisedValue' | 'collateralId' | 'loanAmount';
 
 export default function LoanForm({ walletAddress, initialCollateralId }: Props) {
   const [step, setStep] = useState<'collateral' | 'loan'>(
@@ -79,6 +58,9 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
   const [collateralPendingHash, setCollateralPendingHash] = useState<string | null>(null);
   const [loanPendingHash, setLoanPendingHash] = useState<string | null>(null);
   const [pendingError, setPendingError] = useState<string | null>(null);
+  const [successLoanId, setSuccessLoanId] = useState<string | null>(null);
+  // Fields the user has left at least once — errors show on blur, not on every keystroke.
+  const [touched, setTouched] = useState<Partial<Record<FieldName, boolean>>>({});
   const toast = useToast();
   const { retryCountdown, isRateLimited, fetchWithLimit } = useFetchWithRateLimit();
   const networkMismatch = useNetworkMismatch(walletAddress);
@@ -96,19 +78,31 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
   const collateralHasErrors = Object.values(collateralErrors).some(Boolean);
   const loanHasErrors = Object.values(loanErrors).some(Boolean);
 
+  const allErrors: Record<FieldName, string | null> = { ...collateralErrors, ...loanErrors };
+  const markTouched = (name: FieldName) => setTouched((t) => ({ ...t, [name]: true }));
+  /** Inline error once the field was blurred or the form submitted. */
+  const errorFor = (name: FieldName) =>
+    touched[name] || submitted ? (allErrors[name] ?? undefined) : undefined;
+  /** Success indicator once a blurred field holds a valid value. */
+  const validFor = (name: FieldName) => !!touched[name] && !allErrors[name];
+
+  function resetToStart() {
+    setSuccessLoanId(null);
+    setStep('collateral');
+    setCount('');
+    setAppraisedValue('');
+    setCollateralId('');
+    setLoanAmount('');
+    setTouched({});
+    setSubmitted(false);
+  }
+
   const summaryErrors =
     submitted && step === 'collateral'
       ? toSummaryErrors(collateralErrors, COLLATERAL_FIELD_IDS)
       : submitted && step === 'loan'
         ? toSummaryErrors(loanErrors, LOAN_FIELD_IDS)
         : [];
-
-  /* Success overlay state */
-  const [successOverlay, setSuccessOverlay] = useState<{
-    title: string;
-    message: string;
-    redirect: string;
-  } | null>(null);
 
   async function registerCollateral() {
     setSubmitted(true);
@@ -144,12 +138,13 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
     }
   }
 
-  function handleCollateralTxTerminal(status: "confirmed" | "failed", errorCode?: string) {
-    if (status === "confirmed" && collateralPendingHash) {
+  function handleCollateralTxTerminal(status: TransactionStatus, errorCode?: string) {
+    if (status === 'confirmed' && collateralPendingHash) {
       toast.success(`Collateral confirmed!`);
       setSubmitted(false);
+      setTouched({});
       setStep('loan');
-    } else if (status === "failed") {
+    } else if (status === 'failed') {
       const msg = errorCode ? `Transaction failed: ${errorCode}` : 'Transaction failed';
       setPendingError(msg);
       toast.error(msg);
@@ -194,10 +189,10 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
     }
   }
 
-  function handleLoanTxTerminal(status: "confirmed" | "failed", errorCode?: string) {
-    if (status === "confirmed" && loanPendingHash) {
+  function handleLoanTxTerminal(status: TransactionStatus, errorCode?: string) {
+    if (status === 'confirmed' && loanPendingHash) {
       setSuccessLoanId(loanPendingHash);
-    } else if (status === "failed") {
+    } else if (status === 'failed') {
       const msg = errorCode ? `Transaction failed: ${errorCode}` : 'Transaction failed';
       setPendingError(msg);
       toast.error(msg);
@@ -224,12 +219,11 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
                 <span data-testid="success-loan-id">{successLoanId}</span>
               </p>
               <p>
-                <span className="font-medium">Collateral ID:</span>{' '}
-                {collateralId}
+                <span className="font-medium">Collateral ID:</span> {collateralId}
               </p>
               <p>
-                <span className="font-medium">Amount:</span>{' '}
-                {parseInt(loanAmount).toLocaleString()} stroops
+                <span className="font-medium">Amount:</span> {parseInt(loanAmount).toLocaleString()}{' '}
+                stroops
               </p>
             </div>
           }
@@ -261,6 +255,7 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
             label="Animal Type"
             value={animalType}
             onChange={(e) => setAnimalType(e.target.value)}
+            helperText="The type of livestock you are pledging as collateral."
             disabled={loading}
           >
             {ANIMAL_TYPES.map((a) => (
@@ -273,14 +268,25 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
             type="number"
             placeholder="Number of animals"
             value={count}
+            inputMode="numeric"
+            min={LIMITS.countMin}
+            max={LIMITS.countMax}
+            step={1}
+            required
             onChange={(e) => setCount(e.target.value)}
-            error={submitted ? (collateralErrors.count ?? undefined) : undefined}
+            onBlur={() => markTouched('count')}
+            error={errorFor('count')}
+            success={validFor('count')}
+            helperText={`Whole number between ${fmt(LIMITS.countMin)} and ${fmt(LIMITS.countMax)}.`}
             disabled={loading}
           />
           {/* Appraised Value with tooltip — #1095 */}
           <div>
             <div className="flex items-center gap-1 mb-1">
-              <label htmlFor={COLLATERAL_FIELD_IDS.appraisedValue} className="text-sm font-medium text-brown-700">
+              <label
+                htmlFor={COLLATERAL_FIELD_IDS.appraisedValue}
+                className="text-sm font-medium text-brown-700"
+              >
                 Appraised Value (stroops)
               </label>
               <FieldTooltip
@@ -293,8 +299,15 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
               type="number"
               placeholder="Total appraised value"
               value={appraisedValue}
+              inputMode="numeric"
+              min={LIMITS.appraisedMin}
+              step={1}
+              required
               onChange={(e) => setAppraisedValue(e.target.value)}
-              error={submitted ? (collateralErrors.appraisedValue ?? undefined) : undefined}
+              onBlur={() => markTouched('appraisedValue')}
+              error={errorFor('appraisedValue')}
+              success={validFor('appraisedValue')}
+              helperText="Whole number of stroops (1 XLM = 10,000,000 stroops). You can borrow up to 70% of this."
               disabled={loading}
             />
           </div>
@@ -339,8 +352,15 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
               type="number"
               placeholder="Your collateral ID"
               value={collateralId}
+              inputMode="numeric"
+              min={1}
+              step={1}
+              required
               onChange={(e) => setCollateralId(e.target.value)}
-              error={submitted ? (loanErrors.collateralId ?? undefined) : undefined}
+              onBlur={() => markTouched('collateralId')}
+              error={errorFor('collateralId')}
+              success={validFor('collateralId')}
+              helperText="The numeric ID you received after registering collateral."
               disabled={loading}
             />
             <Input
@@ -349,8 +369,15 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
               type="number"
               placeholder="Amount to borrow"
               value={loanAmount}
+              inputMode="numeric"
+              min={LIMITS.loanMin}
+              step={1}
+              required
               onChange={(e) => setLoanAmount(e.target.value)}
-              error={submitted ? (loanErrors.loanAmount ?? undefined) : undefined}
+              onBlur={() => markTouched('loanAmount')}
+              error={errorFor('loanAmount')}
+              success={validFor('loanAmount')}
+              helperText={`Whole number of stroops, minimum ${fmt(LIMITS.loanMin)}. Capped at 70% of your collateral value.`}
               disabled={loading}
             />
             <button
@@ -375,9 +402,15 @@ export default function LoanForm({ walletAddress, initialCollateralId }: Props) 
             </button>
           </form>
           {(collateralPendingHash || loanPendingHash) && (
-            <div className="mt-3 p-3 rounded-xl text-sm bg-amber-50 border border-amber-200 text-amber-800" role="status" aria-live="polite">
+            <div
+              className="mt-3 p-3 rounded-xl text-sm bg-amber-50 border border-amber-200 text-amber-800"
+              role="status"
+              aria-live="polite"
+            >
               <p className="font-medium">Transaction pending confirmation...</p>
-              <p className="font-mono text-xs mt-1 break-all">{collateralPendingHash || loanPendingHash}</p>
+              <p className="font-mono text-xs mt-1 break-all">
+                {collateralPendingHash || loanPendingHash}
+              </p>
               {pendingError && <p className="text-red-600 mt-1">{pendingError}</p>}
             </div>
           )}

@@ -1,100 +1,56 @@
-# Test Coverage Report
+# Test Coverage
 
-## Overview
-This document outlines the comprehensive test coverage for the StellarKraal backend API.
+This document describes the test coverage requirements for the backend and how to check them locally.
 
-## Test Files
+## Minimum Coverage Requirement
 
-### 1. `src/index.test.ts`
-- Basic API endpoint tests
-- Health check validation
-- Collateral registration
-- Loan request/repay flows
-- Idempotency testing
-- Pagination tests
-- Request ID middleware
+The backend enforces a **70% minimum test coverage** threshold. Pull requests that drop coverage below this threshold will fail CI.
 
-### 2. `src/loan-lifecycle.integration.test.ts`
-- Full loan lifecycle integration tests
-- Register collateral → Request loan → Repay → Health check
-- Happy paths and error scenarios
-- Edge cases for all 5 main endpoints
+## Backend CI Gates
 
-### 3. `src/routes/v1.integration.test.ts` (NEW)
-- Comprehensive v1 API endpoint tests
-- All 5 endpoints: register, request, repay, liquidate, health
-- Version envelope validation
-- Full lifecycle testing
-- Edge cases and error handling
-- 80%+ coverage target
+The backend CI workflow (`.github/workflows/backend-ci.yml`) runs four independent jobs in parallel:
 
-### 4. `src/routes/v1.test.ts` (NEW)
-- Unit tests for v1 router
-- Version envelope middleware
-- Route mounting validation
+- **Lint** — runs ESLint and fails on any lint error.
+- **Type-check** — runs the TypeScript compiler in no-emit mode and fails on any type error.
+- **Test** — runs the test suite with coverage and fails if overall coverage drops below 70%.
+- **Build** — compiles the backend and fails if the build breaks.
 
-## Coverage by Module
+Each job reports a clear failure message so you can tell which gate failed without digging through logs.
 
-### API Endpoints (100% coverage)
-- ✅ POST /api/v1/collateral/register
-- ✅ POST /api/v1/loan/request
-- ✅ POST /api/v1/loan/repay
-- ✅ POST /api/v1/loan/liquidate
-- ✅ GET /api/v1/loan/:id
-- ✅ GET /api/v1/health/:loanId
-- ✅ GET /api/v1/health
+## Running Tests Locally
 
-### Test Scenarios
-
-#### Happy Paths
-- Valid collateral registration
-- Successful loan requests
-- Partial and full loan repayments
-- Loan liquidation
-- Health factor checks
-- Full lifecycle completion
-
-#### Error Paths
-- Missing required fields
-- Invalid Stellar public keys
-- Negative/zero amounts
-- Invalid data types
-- Malformed JSON
-- Empty arrays
-
-#### Edge Cases
-- Very large amounts
-- Multiple collateral IDs
-- Loan ID 0
-- Large loan IDs
-- Different animal types
-- Various health statuses
-
-## Running Tests
+Run the backend test suite with coverage reporting:
 
 ```bash
-# Run all tests
-npm test
-
-# Run with coverage
+cd backend
 npm test -- --coverage
-
-# Run specific test file
-npm test -- src/routes/v1.integration.test.ts
-
-# Run in watch mode
-npm test -- --watch
 ```
 
-## Coverage Thresholds
+To run a single test file:
 
-The project enforces minimum coverage thresholds:
-- Lines: 80%
-- Functions: 80%
-- Branches: 80%
-- Statements: 80%
+```bash
+cd backend
+npm test -- path/to/file.test.ts
+```
 
-## CI Integration
+## Checking Coverage Locally
 
-Tests run automatically on every pull request via GitHub Actions.
-Coverage reports are generated and enforced at 80% minimum.
+After running the suite with `--coverage`, a coverage summary is printed to the console and a detailed HTML report is written to `backend/coverage/`. Open `backend/coverage/index.html` in a browser to inspect uncovered lines.
+
+Confirm the overall coverage meets the 70% minimum before opening a pull request. If your change introduces new code paths, add tests that exercise them so coverage does not regress.
+
+## Coverage by Area
+
+- **Backend**: `cd backend && npm test -- --coverage`
+- **Frontend**: `cd frontend && npm test -- --coverage`
+- **Contracts**: `cd contracts && npm test`
+
+## Reviewer Quality Gates
+
+Reviewers should confirm the following before approving a PR:
+
+- [ ] CI passes, including the lint, type-check, test, and build jobs
+- [ ] New or changed logic is covered by tests
+- [ ] Overall coverage remains at or above 70%
+- [ ] Code follows the ESLint and Prettier configurations
+- [ ] No unrelated changes are bundled into the PR

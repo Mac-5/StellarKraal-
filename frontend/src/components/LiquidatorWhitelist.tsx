@@ -5,6 +5,7 @@ import Card from '@/components/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/FormField';
 import { useNetworkStatus } from '@/hooks/useNetworkStatus';
+import ScrollableTable from './ScrollableTable';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -224,7 +225,10 @@ export default function LiquidatorWhitelist({
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-brown-100 dark:border-brown-700">
+          <ScrollableTable
+            label="Approved liquidators table"
+            className="rounded-xl border border-brown-100 dark:border-brown-700"
+          >
             <table
               className="w-full text-sm"
               aria-label="Approved liquidators"
@@ -287,7 +291,7 @@ export default function LiquidatorWhitelist({
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         )}
       </Card>
     </section>

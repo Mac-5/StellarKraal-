@@ -22,11 +22,12 @@ RUN npm run build
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runner
 ENV NODE_ENV=production
 WORKDIR /app
-RUN (getent group node || addgroup -S -g 1000 node) && (getent passwd node || adduser -S -u 1000 -G node node)
-COPY --from=builder --chown=node:node /app/.next/standalone ./
-COPY --from=builder --chown=node:node /app/.next/static ./.next/static
-COPY --from=builder --chown=node:node /app/public ./public
-RUN chown -R node:node /app
-USER node
+# Create a dedicated non-root user (uid/gid 1001) per CIS Docker Benchmark.
+RUN addgroup --system --gid 1001 app && adduser --system --uid 1001 --ingroup app app
+COPY --from=builder --chown=app:app /app/.next/standalone ./
+COPY --from=builder --chown=app:app /app/.next/static ./.next/static
+COPY --from=builder --chown=app:app /app/public ./public
+RUN chown -R app:app /app
+USER app
 EXPOSE 3000
 CMD ["node", "server.js"]

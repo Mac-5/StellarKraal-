@@ -1,57 +1,82 @@
 name: Docker Security Scan
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/Dockerfile'
+      - 'frontend/Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/docker-security-scan.yml'
   pull_request:
+    branches: [main]
     paths:
       - "backend/Dockerfile"
       - "frontend/Dockerfile"
       - "backend/**"
       - "frontend/**"
+      - "trivy-ignore.yaml"
+      - ".github/workflows/docker-security-scan.yml"
   push:
     branches:
       - main
+    tags:
+      - "v*"
   schedule:
-    - cron: "0 0 * * 0" # Weekly on Sunday at midnight UTC
+    - cron: '0 3 * * 1'
   workflow_dispatch:
 
 jobs:
-  scan-backend:
+  scan:
+    name: Scan Docker images
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Trivy scans a locally loaded image — multi-platform push is not
-      # needed here. We build amd64 only so --load works (buildx cannot
-      # --load a multi-platform image into the local daemon).
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Build backend image
+        run: docker build -t app-backend:scan ./backend
 
-      - name: Build backend image for scanning (linux/amd64)
-        uses: docker/build-push-action@v6
+      - name: Build frontend image
+        run: docker build -t app-frontend:scan ./frontend
+
+      - name: Verify containers run as non-root user
+        run: |
+          set -euo pipefail
+          status=0
+          for image in app-backend:scan app-frontend:scan; do
+            user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            echo "$image configured user: '${user}'"
+            if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ] || [ "$user" = "0:0" ]; then
+              echo "::error::Image $image is configured to run as root (user='${user}')"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Run Trivy vulnerability scanner (backend)
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          context: ./backend
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: stellarkraal-backend:${{ github.sha }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+          image-ref: app-backend:scan
+          format: 'sarif'
+          output: 'trivy-backend.sarif'
+          severity: 'CRITICAL,HIGH'
 
-      - name: Run Trivy vulnerability scanner (CRITICAL — fail build)
+      - name: Run Trivy vulnerability scanner (CRITICAL/HIGH — fail build)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: stellarkraal-backend:${{ github.sha }}
           format: table
-          severity: CRITICAL
+          severity: CRITICAL,HIGH
           exit-code: 1
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: trivy-ignore.yaml
 
-      - name: Run Trivy vulnerability scanner (SARIF upload)
+      - name: Upload backend scan results
         if: always()
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -61,22 +86,43 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 0
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: trivy-ignore.yaml
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('trivy-backend-results.sarif') != ''
         with:
-          sarif_file: trivy-backend-results.sarif
-          category: backend-image
+          sarif_file: 'trivy-backend.sarif'
+          category: 'trivy-backend'
 
-      - name: Upload Trivy scan results as artifact
+      - name: Upload frontend scan results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-backend-results
           path: trivy-backend-results.sarif
           retention-days: 30
+
+      - name: Generate SBOM (CycloneDX JSON) for backend image
+        uses: anchore/sbom-action@v0
+        with:
+          image: stellarkraal-backend:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-backend.cyclonedx.json
+          artifact-name: sbom-backend
+
+      - name: Upload backend SBOM as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-backend
+          path: sbom-backend.cyclonedx.json
+          retention-days: 30
+
+      - name: Attach backend SBOM to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom-backend.cyclonedx.json
 
   scan-frontend:
     runs-on: ubuntu-latest
@@ -101,15 +147,15 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-      - name: Run Trivy vulnerability scanner (CRITICAL — fail build)
+      - name: Run Trivy vulnerability scanner (CRITICAL/HIGH — fail build)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: stellarkraal-frontend:${{ github.sha }}
           format: table
-          severity: CRITICAL
+          severity: CRITICAL,HIGH
           exit-code: 1
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: trivy-ignore.yaml
 
       - name: Run Trivy vulnerability scanner (SARIF upload)
         if: always()
@@ -121,19 +167,33 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 0
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: trivy-ignore.yaml
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('trivy-frontend-results.sarif') != ''
-        with:
-          sarif_file: trivy-frontend-results.sarif
-          category: frontend-image
-
-      - name: Upload Trivy scan results as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: trivy-frontend-results
           path: trivy-frontend-results.sarif
           retention-days: 30
+
+      - name: Generate SBOM (CycloneDX JSON) for frontend image
+        uses: anchore/sbom-action@v0
+        with:
+          image: stellarkraal-frontend:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-frontend.cyclonedx.json
+          artifact-name: sbom-frontend
+
+      - name: Upload frontend SBOM as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-frontend
+          path: sbom-frontend.cyclonedx.json
+          retention-days: 30
+
+      - name: Attach frontend SBOM to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom-frontend.cyclonedx.json

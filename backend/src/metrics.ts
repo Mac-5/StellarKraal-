@@ -34,6 +34,18 @@ export const rpcCallDurationSeconds = new Histogram({
   registers: [registry],
 });
 
+/**
+ * Contract invocation latency in seconds.
+ * Labels: operation (request_loan, repay_loan, liquidate), status (success/error)
+ */
+export const contractInvocationDurationSeconds = new Histogram({
+  name: "contract_invocation_duration_seconds",
+  help: "Soroban contract invocation duration in seconds",
+  labelNames: ["operation", "status"] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [registry],
+});
+
 // ── DB Connection Pool metrics ────────────────────────────────────────────────
 
 /** Total number of connections acquired from the pool since process start. */

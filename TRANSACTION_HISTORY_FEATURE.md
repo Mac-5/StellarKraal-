@@ -206,6 +206,77 @@ interface PaginationData { ... }
 4. **Caching**: Component uses React hooks for efficient re-renders
 5. **Debouncing**: Filter changes reset to page 1 to avoid confusion
 
+## Loan State Machine & On-Chain Event Mapping
+
+This section maps every loan state transition to the Soroban contract event that emits it, so event listeners can reliably reconstruct loan state from the chain.
+
+### Loan States
+
+| State | Description | Possible Entry Conditions | Possible Exit Conditions |
+|-------|-------------|---------------------------|--------------------------|
+| `Requested` | Borrower has submitted a loan request awaiting approval/funding | `request_loan` succeeds → `LoanRequested` | Approved → `Approved`; Cancelled → `Cancelled`; Expired → `Expired` |
+| `Approved` | Loan approved by lender, awaiting disbursement | `approve_loan` succeeds → `LoanApproved` | Disbursed → `Active`; Cancelled → `Cancelled` |
+| `Active` | Funds disbursed, loan outstanding | `disburse_loan` succeeds → `LoanDisbursed` | Fully repaid → `Repaid`; Defaulted → `Defaulted`; Liquidated → `Liquidated` |
+| `Repaid` | Loan fully repaid (terminal) | `repay_loan` reaches full amount → `LoanRepaid` | — (terminal) |
+| `Defaulted` | Loan past due without full repayment | `mark_default` succeeds → `LoanDefaulted` | Liquidated → `Liquidated` |
+| `Liquidated` | Collateral seized and loan closed (terminal) | `liquidate_loan` succeeds → `LoanLiquidated` | — (terminal) |
+| `Cancelled` | Loan cancelled before disbursement (terminal) | `cancel_loan` succeeds → `LoanCancelled` | — (terminal) |
+| `Expired` | Request expired before approval (terminal) | `expire_loan` succeeds → `LoanExpired` | — (terminal) |
+
+### Transition → Event Mapping
+
+| From | To | Contract Function | Soroban Event Name | Event Payload |
+|------|----|-------------------|--------------------|---------------|
+| — | `Requested` | `request_loan` | `LoanRequested` | `{ loan_id, borrower, amount, collateral_id, requested_at }` |
+| `Requested` | `Approved` | `approve_loan` | `LoanApproved` | `{ loan_id, lender, approved_at }` |
+| `Approved` | `Active` | `disburse_loan` | `LoanDisbursed` | `{ loan_id, borrower, amount, disbursed_at }` |
+| `Active` | `Repaid` | `repay_loan` | `LoanRepaid` | `{ loan_id, borrower, amount, remaining, repaid_at }` |
+| `Active` | `Defaulted` | `mark_default` | `LoanDefaulted` | `{ loan_id, borrower, defaulted_at }` |
+| `Defaulted` | `Liquidated` | `liquidate_loan` | `LoanLiquidated` | `{ loan_id, liquidator, collateral_id, seized_amount, liquidated_at }` |
+| `Requested` | `Cancelled` | `cancel_loan` | `LoanCancelled` | `{ loan_id, borrower, cancelled_at }` |
+| `Approved` | `Cancelled` | `cancel_loan` | `LoanCancelled` | `{ loan_id, borrower, cancelled_at }` |
+| `Requested` | `Expired` | `expire_loan` | `LoanExpired` | `{ loan_id, borrower, expired_at }` |
+
+All events are emitted with topics `(symbol_short!("loan"), event_name, loan_id)` and the payload above as the data value, so listeners can filter by loan id.
+
+### Invalid Transitions & Errors
+
+| Attempted Transition | Condition | Contract Error |
+|----------------------|-----------|----------------|
+| `Approved` → `Active` | Loan not approved | `Error::InvalidState` |
+| `Active` → `Active` | Already disbursed | `Error::InvalidState` |
+| `Repaid` → any | Terminal state | `Error::InvalidState` |
+| `Liquidated` → any | Terminal state | `Error::InvalidState` |
+| `Cancelled` → any | Terminal state | `Error::InvalidState` |
+| `Expired` → any | Terminal state | `Error::InvalidState` |
+| `Active` → `Repaid` | Repayment exceeds remaining balance | `Error::Overpayment` |
+| `Active` → `Defaulted` | Loan not yet past due | `Error::NotDefaulted` |
+| `Defaulted` → `Liquidated` | Collateral already seized | `Error::AlreadyLiquidated` |
+| any → any | Caller not authorized for transition | `Error::Unauthorized` |
+
+Invalid transition attempts revert the transaction and emit no event; the error is returned to the caller.
+
+### Full Lifecycle Timing Diagram
+
+```
+Borrower            Contract                 Lender              Listener
+   |                   |                       |                    |
+   |-- request_loan -->|                       |                    |
+   |                   |-- LoanRequested ----->|                    |
+   |                   |                       |                    |
+   |                   |<---- approve_loan ----|                    |
+   |                   |-- LoanApproved --------------------------->|
+   |                   |                       |                    |
+   |                   |<---- disburse_loan ---|                    |
+   |                   |-- LoanDisbursed -------------------------->|
+   |                   |                       |                    |
+   |-- repay_loan ---->|                       |                    |
+   |                   |-- LoanRepaid ----------------------------->|
+   |                   |                       |                    |
+```
+
+Event order for a successful lifecycle: `LoanRequested` → `LoanApproved` → `LoanDisbursed` → `LoanRepaid`. A default path replaces the final step with `LoanDefaulted` → `LoanLiquidated`.
+
 ## Future Enhancements
 
 1. **Real Database**: Replace in-memory store with SQLite/PostgreSQL
@@ -271,12 +342,3 @@ curl http://localhost:3001/api/transactions/tx_1234567890_abc123
 - `backend/src/db/store.ts` - Added transaction types and functions
 - `backend/src/index.ts` - Added transaction API endpoints
 - `frontend/src/app/dashboard/page.tsx` - Integrated TransactionHistory component
-
-## Integration Notes
-
-The feature is production-ready and follows all existing patterns in the codebase:
-- Uses the same API structure as other endpoints
-- Follows the same error handling patterns
-- Uses the same styling (Tailwind CSS with brown/gold/cream theme)
-- Integrates seamlessly with existing authentication (JWT middleware)
-- Respects rate limiting on API calls

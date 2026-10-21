@@ -1,4 +1,14 @@
-export { Input, Textarea, Select, Checkbox, RadioGroup, Label, FieldError } from './FormField';
+export {
+  Input,
+  Textarea,
+  Select,
+  Checkbox,
+  RadioGroup,
+  Label,
+  FieldError,
+  HelperText,
+  CharCount,
+} from './FormField';
 export type {
   InputProps,
   TextareaProps,

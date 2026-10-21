@@ -1,6 +1,7 @@
 import request from "supertest";
 import app from "./index";
 import { insertCollateral, insertLoan, insertTransaction } from "./db/store";
+import { checkDbHealth } from "./db/migrationRunner";
 
 // Valid 56-char Stellar public key for use in tests
 const VALID_ADDRESS = "GB4QO2DT7ASHWBIQS4DQ6O7M3UKNT2SWL7TBLZSC4S5FWBSL6VZ6TMEN";
@@ -122,6 +123,37 @@ jest.mock("@stellar/stellar-sdk", () => {
 });
 
 describe("StellarKraal API", () => {
+  describe("GET /health database connectivity", () => {
+    const mockCheckDbHealth = checkDbHealth as jest.MockedFunction<typeof checkDbHealth>;
+
+    afterEach(() => {
+      mockCheckDbHealth.mockResolvedValue(true);
+    });
+
+    it("returns 200 with database status and preserves uptime", async () => {
+      mockCheckDbHealth.mockResolvedValue(true);
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ status: "ok", db: "ok" });
+      expect(typeof res.body.uptime).toBe("number");
+    });
+
+    it("returns 503 when the database is unreachable", async () => {
+      mockCheckDbHealth.mockResolvedValue(false);
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ status: "degraded", db: "error" });
+      expect(typeof res.body.uptime).toBe("number");
+    });
+
+    it("returns the degraded response when the connectivity probe rejects", async () => {
+      mockCheckDbHealth.mockRejectedValueOnce(new Error("connection refused"));
+      const res = await request(app).get("/health");
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ status: "degraded", db: "error" });
+    });
+  });
+
   describe("GET /api/health", () => {
     it("returns 200 with health status", async () => {
       const res = await request(app).get("/api/health");

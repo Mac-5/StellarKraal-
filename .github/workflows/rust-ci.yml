@@ -55,14 +55,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-target-
 
-      - name: Build Soroban contract (release)
+      - name: Build Soroban contract (release, stellarkraal)
         run: |
           cd contracts/stellarkraal
           cargo build --release
 
-      - name: Run tests
+      - name: Run tests (stellarkraal)
         run: |
           cd contracts/stellarkraal
+          cargo test
+
+      - name: Build Soroban contract (release, lottery)
+        run: |
+          cd contracts/lottery
+          cargo build --release
+
+      - name: Run tests (lottery)
+        run: |
+          cd contracts/lottery
           cargo test
 
       - name: Install nightly Rust (fuzz)

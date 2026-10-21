@@ -20,6 +20,7 @@ const REDACTED_FIELDS = new Set([
   "password", "secret", "private_key", "privatekey", "seed",
   "mnemonic", "token", "authorization", "api_key", "apikey",
   "secret_key", "secretkey", "signing_key", "signingkey",
+  "refreshtoken",
 ]);
 
 /** Stellar public key pattern: G followed by 55 base32 characters. */

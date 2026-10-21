@@ -18,7 +18,8 @@ import {
   listDeletedCollateral,
   isCollateralPledged,
   getLoanSummaryForBorrower,
-  getAppraisalHistory,
+  getAppraisalHistoryCursor,
+  decodeAppraisalCursor,
   addAppraisal,
   insertLoan,
   getLoan,
@@ -93,7 +94,11 @@ import rpcClient from './utils/rpcClient';
 import { mapSorobanError } from './utils/sorobanErrors';
 import { registerWebhook, getWebhooks, getDeliveryLogs, fireWebhooks } from './webhooks';
 import { etagMiddleware } from './utils/etag';
-import { scheduleHealthFactorJob, runHealthFactorJob } from './jobs/healthFactorJob';
+import {
+  scheduleHealthFactorJob,
+  runHealthFactorJob,
+  evaluateHealthFactors,
+} from './jobs/healthFactorJob';
 import { scheduleRepaymentReminderJob } from './jobs/repaymentReminderJob';
 import { compressionMiddleware } from './middleware/compression';
 import { sanitizeInput } from './middleware/sanitize';
@@ -105,7 +110,9 @@ import { registry, httpActiveConnections, httpRequestDurationSeconds, httpReques
 import { fireAlert } from './utils/alerting';
 import { rules } from './utils/alertRules';
 import { healthRouter } from './routes/health';
+import { loanRepaymentRouter } from './routes/loanRepayment';
 import { metricsAuthMiddleware } from './middleware/metricsAuth';
+import { bodySizeLimit, MAX_BODY_SIZE_BYTES } from './middleware/bodySizeLimit';
 
 // ── 5xx spike tracking (rolling 60s window) ───────────────────────────────────
 const fivexxTimestamps: number[] = [];
@@ -138,7 +145,9 @@ const app = express();
 // Startup warning for CORS misconfiguration
 app.use(helmetMiddleware);
 app.use(corsMiddleware);
-app.use(express.json());
+app.use(bodySizeLimit);
+app.use(express.json({ limit: `${MAX_BODY_SIZE_BYTES}b` }));
+app.use(express.urlencoded({ extended: true, limit: `${MAX_BODY_SIZE_BYTES}b` }));
 app.use(sanitizeInput);
 app.use(compressionMiddleware);
 
@@ -149,8 +158,13 @@ app.use(requestDrainingMiddleware);
 app.use(shutdownGuardMiddleware);
 
 // GET /health
-app.get('/health', (_req: Request, res: Response) => {
-  res.status(200).json({ status: 'ok', uptime: Math.floor((Date.now() - startTime) / 1000) });
+app.get('/health', async (_req: Request, res: Response) => {
+  const dbHealthy = await checkDbHealth().catch(() => false);
+  res.status(dbHealthy ? 200 : 503).json({
+    status: dbHealthy ? 'ok' : 'degraded',
+    db: dbHealthy ? 'ok' : 'error',
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+  });
 });
 
 // GET /api/health
@@ -255,8 +269,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authLimiter, authRouter);
+app.use('/api/v1/auth', authLimiter, authRouter);
 app.use(jwtMiddleware);
 app.use(deduplicationMiddleware);
+app.use('/api/v1', loanRepaymentRouter);
 
 // ── API v2 stub ───────────────────────────────────────────────────────────────
 app.use('/api/v2', v2Router);
@@ -1189,6 +1205,40 @@ app.post(
   })
 );
 
+// POST /api/v1/admin/liquidation/check — evaluate liquidation candidates
+app.post(
+  '/api/v1/admin/liquidation/check',
+  asyncHandler(async (req: Request, res: Response) => {
+    const user = (req as any).user as { publicKey?: string; role?: string } | undefined;
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: admin role required' });
+    }
+
+    const dryRun = req.query.dryRun === 'true';
+    insertAuditEntry({
+      userId: user.publicKey ?? 'unknown',
+      action: 'liquidation.check',
+      resource: 'liquidation',
+      resourceId: 'bulk',
+      requestBody: redact({ dryRun }),
+      ip: req.ip,
+    });
+    auditLogger.info('liquidation.check', {
+      requestId: (req as any).requestId,
+      userId: user.publicKey,
+      dryRun,
+    });
+
+    const evaluation = await evaluateHealthFactors({ applyUpdates: !dryRun });
+    res.json({
+      loans: evaluation.candidates,
+      dryRun,
+      updated: evaluation.updated,
+      triggeredAt: new Date().toISOString(),
+    });
+  })
+);
+
 // ── soft-delete admin routes ──────────────────────────────────────────────────
 
 // GET /api/admin/deleted/collateral — list soft-deleted collateral records
@@ -1256,7 +1306,7 @@ const upload = multer({
     destination: (_req, _file, cb) => cb(null, uploadsDir),
     filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname)}`),
   }),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: MAX_BODY_SIZE_BYTES },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
     else cb(new Error('Only image files are allowed'));
@@ -1324,7 +1374,6 @@ app.post(
 
 // ── v1 collateral CRUD ────────────────────────────────────────────────────────
 
-const MAX_COLLATERAL_IMAGE_SIZE = 5 * 1024 * 1024;
 const COLLATERAL_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
@@ -1383,7 +1432,7 @@ const v1CollateralImageUpload = multer({
       cb(null, `${randomUUID()}${extension}`);
     },
   }),
-  limits: { fileSize: MAX_COLLATERAL_IMAGE_SIZE },
+  limits: { fileSize: MAX_BODY_SIZE_BYTES },
   fileFilter: (_req, file, cb) => {
     const mimetype = file.mimetype.toLowerCase();
     if (!COLLATERAL_IMAGE_EXTENSIONS[mimetype]) {
@@ -1417,10 +1466,11 @@ const handleV1CollateralImageError = (
   }
 
   removeUploadedFile(req.file);
-  const message =
-    isMulterError && (err as { code?: string }).code === 'LIMIT_FILE_SIZE'
-      ? 'image must be 5 MiB or smaller'
-      : err.message || 'image upload is invalid';
+  if (isMulterError && (err as { code?: string }).code === 'LIMIT_FILE_SIZE') {
+    res.status(413).json({ error: 'Payload Too Large' });
+    return;
+  }
+  const message = err.message || 'image upload is invalid';
   res.status(422).json({
     error: 'Validation failed',
     code: 'VALIDATION_ERROR',
@@ -1545,12 +1595,23 @@ app.get(
   })
 );
 
+// GET /api/v1/collateral/:id — fetch one collateral record
+app.get(
+  '/api/v1/collateral/:id',
+  readLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const record = getCollateral(req.params.id as string);
+    if (!record) return res.status(404).json({ error: 'Collateral not found' });
+    res.json(record);
+  })
+);
+
 // PUT /api/v1/collateral/:id/appraise — update appraised_value
 app.put(
   '/api/v1/collateral/:id/appraise',
   timeoutMiddleware(parseInt(config.TIMEOUT_WRITE_MS, 10)),
   asyncHandler(async (req: Request, res: Response) => {
-    const { appraised_value } = req.body;
+    const { appraised_value, appraiserNote } = req.body;
     if (
       typeof appraised_value !== 'number' ||
       !Number.isInteger(appraised_value) ||
@@ -1558,42 +1619,125 @@ app.put(
     ) {
       return res.status(400).json({ error: 'appraised_value must be a positive integer' });
     }
+    if (appraiserNote !== undefined && typeof appraiserNote !== 'string') {
+      return res.status(400).json({ error: 'appraiserNote must be a string' });
+    }
     const record = getCollateral(req.params.id as string);
     if (!record) return res.status(404).json({ error: 'Record not found' });
     record.appraised_value = appraised_value;
     const appraiser = (req as Request & { user?: { publicKey?: string } }).user?.publicKey;
     setAppraisal(req.params.id as string, appraised_value);
-    addAppraisal(req.params.id as string, appraised_value, appraiser);
+    addAppraisal(req.params.id as string, appraised_value, appraiser, appraiserNote);
     invalidateCache(`/api/v1/collateral/${req.params.id}/appraisals`);
     res.json(record);
   })
 );
 
-// GET /api/v1/collateral/:id/appraisals — paginated appraisal history
+/**
+ * @openapi
+ * /collateral/{id}/appraisals:
+ *   get:
+ *     tags:
+ *       - collateral
+ *     summary: Get appraisal history
+ *     description: Returns appraisal history ordered by appraisedAt descending. Only the collateral owner or an authenticated admin may access it. Timestamp ties use append order for stable cursor traversal.
+ *     operationId: getCollateralAppraisals
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Collateral record ID
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: cursor
+ *         description: Opaque nextCursor from a previous response; omit for the first page
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         description: Maximum appraisals per page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 50
+ *           default: 20
+ *     responses:
+ *       '200':
+ *         description: Appraisal history page
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [data, nextCursor, hasMore]
+ *               properties:
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     required: [appraisedAt, valueUSD, appraiserNote]
+ *                     properties:
+ *                       appraisedAt:
+ *                         type: string
+ *                         format: date-time
+ *                         description: Time the appraisal was recorded
+ *                       valueUSD:
+ *                         type: number
+ *                         description: Recorded appraisal value
+ *                       appraiserNote:
+ *                         type: string
+ *                         nullable: true
+ *                         description: Appraiser note, or null if none was recorded
+ *                 nextCursor:
+ *                   type: string
+ *                   nullable: true
+ *                   description: Next page cursor, or null on the final page
+ *                 hasMore:
+ *                   type: boolean
+ *                   description: Whether further appraisals exist
+ *       '400':
+ *         $ref: '#/components/responses/ValidationError'
+ *       '401':
+ *         $ref: '#/components/responses/Unauthorized'
+ *       '404':
+ *         description: Collateral not found, deleted, or not owned by the caller
+ */
 app.get(
   '/api/v1/collateral/:id/appraisals',
-  createResponseCacheMiddleware(5 * 60 * 1000),
+  readLimiter,
   asyncHandler(async (req: Request, res: Response) => {
+    // Authorize every request; private history must not be served from a shared cache.
+    const user = (req as Request & { user?: { publicKey?: string; role?: string } }).user;
+    if (!user?.publicKey) return res.status(401).json({ error: 'Authentication required' });
     const id = req.params.id as string;
     const record = getCollateral(id);
     if (!record) return res.status(404).json({ error: 'Collateral not found' });
 
-    const user = (req as Request & { user?: { publicKey?: string; role?: string } }).user;
-    if (!user || (user.role !== 'admin' && user.publicKey !== record.owner)) {
+    if (user.role !== 'admin' && user.publicKey !== record.owner) {
       return res.status(404).json({ error: 'Collateral not found' });
     }
 
-    const pageRaw = req.query.page !== undefined ? Number(req.query.page) : 1;
     const limitRaw = req.query.limit !== undefined ? Number(req.query.limit) : 20;
-    if (!Number.isInteger(pageRaw) || pageRaw < 1) {
-      return res.status(400).json({ error: 'page must be a positive integer' });
+    if (req.query.limit !== undefined && typeof req.query.limit !== 'string') {
+      return res.status(400).json({ error: 'limit must be between 1 and 50' });
     }
-    if (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 100) {
-      return res.status(400).json({ error: 'limit must be between 1 and 100' });
+    if (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 50) {
+      return res.status(400).json({ error: 'limit must be between 1 and 50' });
+    }
+    if (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') {
+      return res.status(400).json({ error: 'Invalid cursor' });
+    }
+    const cursor = req.query.cursor as string | undefined;
+    if (cursor) {
+      const position = decodeAppraisalCursor(cursor);
+      if (!position || position.collateralId !== id) {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
     }
 
-    const result = getAppraisalHistory(id, pageRaw, limitRaw)!;
-    res.json(result);
+    res.json(getAppraisalHistoryCursor(id, cursor, limitRaw));
   })
 );
 
@@ -1784,6 +1928,17 @@ app.get(
 
     const summary = getLoanSummaryForBorrower(user.publicKey);
     res.json(summary);
+  })
+);
+
+// GET /api/v1/loans/:id — fetch one loan record
+app.get(
+  '/api/v1/loans/:id',
+  readLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const loan = getLoan(req.params.id as string);
+    if (!loan) return res.status(404).json({ error: 'Loan not found' });
+    res.json(loan);
   })
 );
 
@@ -2095,6 +2250,21 @@ app.patch(
 
 // ── error handler ─────────────────────────────────────────────────────────────
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return;
+  const parserError = err as Error & {
+    status?: number;
+    statusCode?: number;
+    type?: string;
+    code?: string;
+  };
+  if (
+    parserError.status === 413 ||
+    parserError.statusCode === 413 ||
+    parserError.type === 'entity.too.large' ||
+    parserError.code === 'LIMIT_FILE_SIZE'
+  ) {
+    return res.status(413).json({ error: 'Payload Too Large' });
+  }
   if (err instanceof PoolExhaustedError) {
     return res.status(503).json({ error: 'Service unavailable: connection pool exhausted' });
   }

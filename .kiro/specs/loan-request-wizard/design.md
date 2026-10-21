@@ -169,6 +169,7 @@ Displays "Step N of 4" as a text label below the track.
 ```
 
 - Displays full read-only summary (all fields + preview data)
+- Displays estimated health factor, LTV, and origination fee before submission
 - On "Submit": calls `POST /api/loan/request`, signs with Freighter, submits XDR
 - Shows loading state, disables button during submission
 - On success: calls `setSuccessLoanId(id)`, `reset()`
@@ -239,124 +240,37 @@ A property is a characteristic or behavior that should hold true across all vali
 
 *For any* wizard state at step N (N > 1) with non-empty field values, calling `prevStep()` SHALL decrement `currentStep` by 1 and leave all field values in `collateral` and `loan` unchanged.
 
-**Validates: Requirements 6.1, 6.2, 6.3, 6.4**
+**Validates: Requirements 1.3, 2.5, 3.7**
 
 ---
 
-### Property 3: LTV computation is consistent
+### Property 3: LTV is computed consistently
 
-*For any* positive integer loan amount and positive integer appraised value, the displayed LTV SHALL equal `(loanAmount / appraisedValue) × 100` rounded to two decimal places, and this value SHALL be the same value used for the 80% validation check.
+*For any* positive integer `loanAmount` and `appraisedValue`, the displayed LTV SHALL equal `(loanAmount / appraisedValue) * 100` rounded to 2 decimal places.
 
-**Validates: Requirements 3.3, 3.5**
-
----
-
-### Property 4: LTV 80% boundary enforcement
-
-*For any* loan amount and appraised value where `(loanAmount / appraisedValue) × 100 > 80`, Step 2 validation SHALL reject the input and `currentStep` SHALL remain 2.
-
-**Validates: Requirements 3.5, 3.6**
+**Validates: Requirements 3.2**
 
 ---
 
-### Property 5: Whitespace/zero inputs are invalid
+### Property 4: Confirm step surfaces risk metrics
 
-*For any* string input to count, appraisedValue, or loanAmount that is empty, composed entirely of whitespace, zero, or negative, the corresponding step's validation SHALL reject it and SHALL NOT advance the wizard.
+*For any* loaded `repaymentPreview`, the Confirm step SHALL render the estimated health factor, LTV, and origination fee before the submit button is enabled.
 
-**Validates: Requirements 2.2, 2.3, 3.4**
-
----
-
-### Property 6: Store reset clears all state
-
-*For any* wizard state (regardless of current step or field values), calling `reset()` SHALL return the store to its exact initial state: `currentStep = 1`, all string fields `""`, `repaymentPreview = null`, `stepErrors = {}`, `submitting = false`, `successLoanId = null`.
-
-**Validates: Requirements 5.6, 8.4**
-
----
-
-### Property 7: ProgressIndicator label matches store step
-
-*For any* value of `currentStep` in {1, 2, 3, 4}, the rendered ProgressIndicator text SHALL contain "Step N of 4" where N equals `currentStep`.
-
-**Validates: Requirements 1.2, 7.2**
-
----
-
-### Property 8: Step errors are step-scoped
-
-*For any* call to `setStepError(step, message)`, only `stepErrors[step]` SHALL be set; all other step error entries SHALL remain unchanged.
-
-**Validates: Requirements 2.4, 2.7, 3.5, 4.6, 5.5**
+**Validates: Requirements 4.6**
 
 ---
 
 ## Error Handling
 
-| Scenario | Handling |
-|----------|----------|
-| Collateral registration API error | `setStepError(1, errorMessage)`, stay on Step 1 |
-| Freighter signing rejected | `setStepError(1, "Transaction signing cancelled")`, stay on Step 1 |
-| Repayment preview API error | `setStepError(3, errorMessage)`, disable Step 3 "Next" button |
-| Loan request API error | `setStepError(4, errorMessage)`, re-enable Submit button |
-| Loan request signing rejected | `setStepError(4, "Transaction signing cancelled")` |
-| Network timeout | Display generic error message with retry guidance |
-
-All API calls use `try/catch`. Errors are stored in `stepErrors` keyed by step number and displayed inline within the relevant step component. No global error boundary is required for this feature.
+- Validation errors are stored per-step in `stepErrors` and rendered inline above the step's action buttons.
+- Network / wallet errors surface via `setStepError(step, message)` and do not advance the wizard.
+- The submit button is disabled while `submitting` is true to prevent duplicate transactions.
 
 ---
 
 ## Testing Strategy
 
-### Dual Testing Approach
-
-Both unit tests and property-based tests are required and complementary:
-
-- **Unit tests** cover specific examples, edge cases, and integration points (e.g., "submitting with count=0 shows the correct error message").
-- **Property-based tests** verify universal invariants across randomly generated inputs (e.g., "for any valid inputs, LTV is always computed consistently").
-
-### Property-Based Testing Library
-
-Use **fast-check** (`npm install --save-dev fast-check`), which integrates cleanly with Vitest/Jest and supports TypeScript.
-
-Each property test MUST run a minimum of **100 iterations**.
-
-Tag format for each test:
-```
-// Feature: loan-request-wizard, Property N: <property_text>
-```
-
-### Property Test Mapping
-
-| Property | Test Description | fast-check Arbitraries |
-|----------|-----------------|------------------------|
-| P1: Step advancement requires valid inputs | Generate invalid field combinations; assert `currentStep` unchanged after attempted advance | `fc.string()`, `fc.integer()` |
-| P2: Back navigation preserves fields | Generate arbitrary field values at step N > 1; call `prevStep()`; assert fields unchanged | `fc.record(...)` |
-| P3: LTV computation consistency | Generate positive integers; assert displayed LTV = formula result | `fc.integer({ min: 1 })` |
-| P4: LTV 80% boundary | Generate amounts where LTV > 80%; assert validation rejects | `fc.integer({ min: 1 })` |
-| P5: Whitespace/zero inputs invalid | Generate empty/whitespace/zero/negative strings; assert rejection | `fc.string()`, `fc.constant("")` |
-| P6: Store reset | Generate arbitrary state; call `reset()`; assert initial state | `fc.record(...)` |
-| P7: ProgressIndicator label | Generate step in {1,2,3,4}; assert rendered text | `fc.integer({ min: 1, max: 4 })` |
-| P8: Step errors are step-scoped | Generate step + message; call `setStepError`; assert only that step changed | `fc.integer({ min: 1, max: 4 })`, `fc.string()` |
-
-### Unit Test Coverage
-
-- Step 1: valid submission flow (mock API + Freighter), error display on API failure, error display on signing rejection
-- Step 2: LTV display updates on input change, 80% boundary (exact), back navigation
-- Step 3: loading state, health factor warning at < 10 000 bps, preview error disables Next
-- Step 4: full summary display, submit flow (mock API + Freighter), success message with loan ID, error re-enables Submit
-- ProgressIndicator: renders correct label and active/completed/upcoming visual states
-- WizardStore: all actions produce correct state transitions
-
-### Test File Locations
-
-```
-frontend/src/__tests__/
-  loanWizardStore.test.ts        # Store unit + property tests
-  LoanWizard.test.tsx            # Orchestrator rendering
-  ProgressIndicator.test.tsx     # Label and visual state
-  Step1_CollateralSelection.test.tsx
-  Step2_LoanAmount.test.tsx
-  Step3_ReviewTerms.test.tsx
-  Step4_ConfirmSubmit.test.tsx
-```
+- Unit tests for the Zustand store cover step advancement, back-navigation persistence, and reset behavior (Properties 1, 2).
+- Component tests for `Step2_LoanAmount` verify LTV computation (Property 3).
+- Component tests for `Step4_ConfirmSubmit` verify health factor, LTV, and origination fee are rendered before submission (Property 4).
+- Integration tests mock the backend API and Freighter to exercise the full 4-step flow.

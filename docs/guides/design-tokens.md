@@ -6,13 +6,115 @@ Design tokens are the single source of truth for the visual language of StellarK
 
 ## Overview
 
-Design tokens are defined in `frontend/src/lib/design-tokens.ts` and exported as JavaScript objects. They include:
+Design tokens are defined in two layers:
 
-- **Color tokens** — brand colors, text colors, status colors, backgrounds
-- **Typography tokens** — heading and body text styles
-- **Utility functions** — helpers for contrast-compliant color pairs and health factor indicators
+1. **Tailwind config** (`frontend/tailwind.config.ts`) — the brand colour palette, font sizes, spacing scale, and border radii are declared under `theme.extend`. Each value is mapped to a CSS custom property (e.g. `--color-primary`) so themes can be swapped at runtime.
+2. **CSS custom properties** (`frontend/src/app/globals.css`) — the `:root` block defines the actual values for every `--color-*`, `--font-size-*`, `--spacing-*`, and `--radius-*` variable referenced by the Tailwind config.
+
+On top of these primitives, `frontend/src/lib/design-tokens.ts` exports semantic JavaScript objects (button, text, status, form tokens) that compose the Tailwind classes. Components should consume these tokens rather than hardcoded hex values or ad-hoc class strings.
 
 All colors meet **WCAG 2.1 AA contrast requirements** (4.5:1 for normal text, 3:1 for large text).
+
+## Tailwind Config Tokens
+
+### Brand Colour Palette
+
+The palette is exposed as `colors.brand` and `colors.status`, each backed by a CSS variable:
+
+```typescript
+// frontend/tailwind.config.ts (excerpt)
+extend: {
+  colors: {
+    brand: {
+      primary: 'var(--color-primary)',
+      secondary: 'var(--color-secondary)',
+      accent: 'var(--color-accent)',
+    },
+    status: {
+      success: 'var(--color-success)',
+      warning: 'var(--color-warning)',
+      error: 'var(--color-error)',
+    },
+  },
+}
+```
+
+Use these as `bg-brand-primary`, `text-brand-secondary`, `border-status-error`, etc.
+
+### Font Sizes
+
+```typescript
+fontSize: {
+  h1: 'var(--font-size-h1)',
+  h2: 'var(--font-size-h2)',
+  h3: 'var(--font-size-h3)',
+  h4: 'var(--font-size-h4)',
+  body: 'var(--font-size-body)',
+  'body-sm': 'var(--font-size-body-sm)',
+  caption: 'var(--font-size-caption)',
+  label: 'var(--font-size-label)',
+}
+```
+
+### Spacing Scale
+
+```typescript
+spacing: {
+  xs: 'var(--spacing-xs)',
+  sm: 'var(--spacing-sm)',
+  md: 'var(--spacing-md)',
+  lg: 'var(--spacing-lg)',
+  xl: 'var(--spacing-xl)',
+}
+```
+
+### Border Radii
+
+```typescript
+borderRadius: {
+  sm: 'var(--radius-sm)',
+  md: 'var(--radius-md)',
+  lg: 'var(--radius-lg)',
+  full: 'var(--radius-full)',
+}
+```
+
+## CSS Custom Properties
+
+Every Tailwind token resolves to a CSS variable declared in `globals.css`:
+
+```css
+:root {
+  --color-primary: #6b4423;
+  --color-secondary: #b8860b;
+  --color-accent: #d4a017;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-error: #dc2626;
+
+  --font-size-h1: 2.25rem;
+  --font-size-h2: 1.875rem;
+  --font-size-h3: 1.5rem;
+  --font-size-h4: 1.25rem;
+  --font-size-body: 1rem;
+  --font-size-body-sm: 0.875rem;
+  --font-size-caption: 0.75rem;
+  --font-size-label: 0.875rem;
+
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 1rem;
+  --radius-full: 9999px;
+}
+```
+
+Rebranding only requires overriding these variables (e.g. in a `[data-theme="dark"]` block) — no component changes needed.
 
 ## Color Tokens
 
@@ -134,9 +236,8 @@ colors.form.error        // 'border-error text-error-dark' — error state
 <input
   type="number"
   placeholder="Amount in stroops"
-  className={colors.form.input}
-  aria-invalid={isError}
   className={isError ? colors.form.error : colors.form.input}
+  aria-invalid={isError}
 />
 ```
 
@@ -262,107 +363,53 @@ Always verify WCAG AA compliance when adding new color pairs:
 
 ## Adding a New Token
 
-### 1. Define the token in `design-tokens.ts`
+### 1. Define the CSS custom property
+
+Add the variable to the `:root` block in `frontend/src/app/globals.css`:
+
+```css
+:root {
+  --color-info: #2563eb;
+}
+```
+
+### 2. Map it in `tailwind.config.ts`
+
+Reference the variable under `theme.extend` so Tailwind generates utilities:
+
+```typescript
+extend: {
+  colors: {
+    status: {
+      info: 'var(--color-info)',
+    },
+  },
+}
+```
+
+### 3. Expose a semantic token in `design-tokens.ts`
 
 ```typescript
 export const colors = {
-  // ... existing tokens
-  
-  // New token category
-  notification: {
-    bg: 'bg-info-light',
-    text: 'text-info-dark',
-    border: 'border-info',
-    icon: 'text-info'
-  }
-} as const;
+  status: {
+    info: {
+      bg: 'bg-status-info/10',
+      text: 'text-status-info',
+      border: 'border-status-info',
+    },
+  },
+};
 ```
 
-### 2. Verify contrast
+### 4. Document it
 
-Use [WebAIM Contrast Checker](https://webaim.org/resources/contrastchecker/) to ensure new colors meet WCAG AA.
+Add the new token to this guide with its CSS variable name, Tailwind class, and contrast ratio.
 
-### 3. Export and use
+## Migration Checklist
 
-```typescript
-// In components
-import { colors } from '@/lib/design-tokens';
+When touching a component, replace hardcoded values with tokens:
 
-<div className={colors.notification.bg}>
-  <span className={colors.notification.icon}>ℹ️</span>
-  <p className={colors.notification.text}>Information message</p>
-</div>
-```
-
-### 4. Document the token
-
-Add a comment explaining when to use the token:
-
-```typescript
-notification: {
-  bg: 'bg-info-light',      // Light blue background
-  text: 'text-info-dark',   // Dark blue text (5:1 contrast)
-  border: 'border-info',    // Border color for info boxes
-  icon: 'text-info'         // Icon color in notifications
-}
-```
-
-## Best Practices
-
-### ✅ Do
-
-- **Use tokens consistently** — never hardcode colors
-- **Test contrast ratios** — use WebAIM or similar tools
-- **Group related tokens** — organize by semantic meaning (primary, status, form)
-- **Document usage** — add JSDoc comments explaining token purpose
-- **Support dark mode** — use `dark:` prefixes for dark theme variants
-- **Follow naming conventions** — `{semantic}_{variant}_{state}` pattern (e.g., `primary_bg_hover`)
-
-### ❌ Don't
-
-- **Hardcode hex colors** — always use tokens
-- **Bypass contrast requirements** — design tokens enforce WCAG compliance
-- **Create single-use tokens** — reuse existing tokens where possible
-- **Mix token types** — don't mix Tailwind classes with raw hex values
-- **Ignore dark mode** — test all tokens in both light and dark themes
-
-## Troubleshooting
-
-### Colors don't render correctly
-
-Ensure Tailwind is processing the Tailwind class names. Design tokens export Tailwind classes (e.g., `'bg-brown-600'`), not raw color values.
-
-```tsx
-// ✅ Correct
-<div className={colors.primary.bg}>Correct</div>
-
-// ❌ Wrong
-<div style={{ backgroundColor: colors.primary.bg }}>Wrong</div>
-```
-
-### Dark mode not working
-
-Verify `tailwind.config.js` has dark mode enabled:
-
-```javascript
-export default {
-  darkMode: 'class', // Enable class-based dark mode
-  // ...
-}
-```
-
-### Contrast check fails
-
-Use [WebAIM Contrast Checker](https://webaim.org/resources/contrastchecker/) to verify the color pair. If contrast is below 4.5:1:
-
-1. Darken text or lighten background
-2. Choose a different color pair from the existing palette
-3. Consider `getContrastPair()` utility for automatic pairing
-
-## Related Resources
-
-- [Tailwind CSS Documentation](https://tailwindcss.com/)
-- [WCAG 2.1 Contrast Guidelines](https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html)
-- [WebAIM Contrast Checker](https://webaim.org/resources/contrastchecker/)
-- [Design Audit Report](../../DARK_MODE_AUDIT.md)
-- [Contributing Guidelines](../../CONTRIBUTING.md)
+- [ ] Hex colours (`#6b4423`) → `bg-brand-primary` / `text-brand-primary`
+- [ ] Arbitrary font sizes (`text-[18px]`) → `text-h4` / `text-body`
+- [ ] Arbitrary spacing (`p-[13px]`) → `p-md` / `gap-lg`
+- [ ] Arbitrary radii (`rounded-[6px]`) → `rounded-md`

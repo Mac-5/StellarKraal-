@@ -18,7 +18,7 @@
   "tags": [
     {
       "name": "auth",
-      "description": "Authentication — challenge/response JWT flow"
+      "description": "Authentication \u2014 challenge/response JWT flow"
     },
     {
       "name": "health",
@@ -160,6 +160,10 @@
                       "type": "integer",
                       "description": "Access token validity period in seconds",
                       "example": 900
+                    },
+                    "refreshToken": {
+                      "type": "string",
+                      "description": "Single-use refresh token, valid for 7 days by default"
                     }
                   }
                 }
@@ -181,7 +185,7 @@
           "auth"
         ],
         "summary": "Rotate refresh token",
-        "description": "Reads the refresh token from the refreshToken httpOnly cookie, validates it, and issues a new access token and rotated cookie. Old token is added to blocklist to prevent reuse attacks.",
+        "description": "Accepts a refreshToken in the JSON body or the existing httpOnly cookie. Atomically consumes the stored SHA-256 digest and issues a short-lived access token and a new refresh token (7 days by default). Reusing the old token returns 401.",
         "operationId": "refreshToken",
         "security": [],
         "responses": {
@@ -202,6 +206,10 @@
                       "type": "integer",
                       "description": "Access token validity in seconds",
                       "example": 900
+                    },
+                    "refreshToken": {
+                      "type": "string",
+                      "description": "Single-use refresh token, valid for 7 days by default"
                     }
                   }
                 }
@@ -213,6 +221,23 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "Refresh token; may instead be supplied via the refreshToken cookie.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "refreshToken": {
+                    "type": "string",
+                    "description": "Raw refresh token issued at login or by a previous rotation"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -505,7 +530,7 @@
         "operationId": "batchRegisterCollateral",
         "requestBody": {
           "required": true,
-          "description": "An array of 1–50 collateral registration items to process in batch.",
+          "description": "An array of 1\u201350 collateral registration items to process in batch.",
           "content": {
             "application/json": {
               "schema": {
@@ -621,7 +646,7 @@
           {
             "name": "pageSize",
             "in": "query",
-            "description": "Number of records per page (1–100).",
+            "description": "Number of records per page (1\u2013100).",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1176,7 +1201,7 @@
           "loan"
         ],
         "summary": "List loans (paginated)",
-        "description": "Returns a paginated list of loan records.\n\n**Cursor-based pagination (recommended)** — Pass `cursor=<nextCursor>` from the previous response. Provides stable, efficient traversal using `(createdAt, id)` as the composite key. `total` and `page` are omitted in cursor mode; use `nextCursor` and `hasMore` instead.\n\n**Offset-based pagination (legacy)** — Use `page` and `pageSize`/`limit` parameters. Remains fully supported for backward compatibility. Returns `total` and `page` fields.\n\nUnpaginated requests (without any pagination params) are deprecated and return `Deprecation`/`Sunset` headers.",
+        "description": "Returns a paginated list of loan records.\n\n**Cursor-based pagination (recommended)** \u2014 Pass `cursor=<nextCursor>` from the previous response. Provides stable, efficient traversal using `(createdAt, id)` as the composite key. `total` and `page` are omitted in cursor mode; use `nextCursor` and `hasMore` instead.\n\n**Offset-based pagination (legacy)** \u2014 Use `page` and `pageSize`/`limit` parameters. Remains fully supported for backward compatibility. Returns `total` and `page` fields.\n\nUnpaginated requests (without any pagination params) are deprecated and return `Deprecation`/`Sunset` headers.",
         "operationId": "listLoans",
         "security": [],
         "parameters": [
@@ -1201,7 +1226,7 @@
           {
             "name": "pageSize",
             "in": "query",
-            "description": "Number of records per page (1–100). Applies to both cursor and offset modes.",
+            "description": "Number of records per page (1\u2013100). Applies to both cursor and offset modes.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -1226,7 +1251,11 @@
             "description": "Filter loans by status.",
             "schema": {
               "type": "string",
-              "enum": ["active", "repaid", "liquidated"]
+              "enum": [
+                "active",
+                "repaid",
+                "liquidated"
+              ]
             }
           },
           {
@@ -1304,7 +1333,7 @@
           "loan"
         ],
         "summary": "Get loan health factor",
-        "description": "Returns the health factor scaled by 10 000. Values ≥ 10 000 are healthy; < 10 000 are eligible for liquidation.",
+        "description": "Returns the health factor scaled by 10 000. Values \u2265 10 000 are healthy; < 10 000 are eligible for liquidation.",
         "operationId": "getLoanHealth",
         "security": [],
         "parameters": [
@@ -1830,7 +1859,7 @@
           {
             "name": "pageSize",
             "in": "query",
-            "description": "Number of records per page (1–100).",
+            "description": "Number of records per page (1\u2013100).",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -2056,7 +2085,7 @@
           "loan"
         ],
         "summary": "Submit pre-signed XDR for loan repayment",
-        "description": "Accepts client pre-signed Soroban XDR directly and submits it to the Stellar RPC network.",
+        "description": "Locks the loan in a database transaction before checking status and submitting signed XDR. Returns 409 for terminal loans or an already pending repayment.",
         "operationId": "repayLoanOnChain",
         "security": [
           {
@@ -2125,6 +2154,15 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "404": {
+            "description": "Loan not found"
+          },
+          "409": {
+            "description": "Loan is not repayable or a repayment is already pending"
+          },
+          "502": {
+            "description": "The network did not accept the transaction"
           }
         }
       }
@@ -2201,6 +2239,115 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/collateral/{id}/appraisals": {
+      "get": {
+        "tags": [
+          "collateral"
+        ],
+        "summary": "Get appraisal history",
+        "description": "Returns appraisal history ordered by appraisedAt descending. Only the collateral owner or an authenticated admin may access it. Timestamp ties use append order for stable cursor traversal.",
+        "operationId": "getCollateralAppraisals",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Collateral record ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "description": "Opaque nextCursor from a previous response; omit for the first page",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "description": "Maximum appraisals per page",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Appraisal history page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "nextCursor",
+                    "hasMore"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "appraisedAt",
+                          "valueUSD",
+                          "appraiserNote"
+                        ],
+                        "properties": {
+                          "appraisedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Time the appraisal was recorded"
+                          },
+                          "valueUSD": {
+                            "type": "number",
+                            "description": "Recorded appraisal value"
+                          },
+                          "appraiserNote": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Appraiser note, or null if none was recorded"
+                          }
+                        }
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Next page cursor, or null on the final page"
+                    },
+                    "hasMore": {
+                      "type": "boolean",
+                      "description": "Whether further appraisals exist"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Collateral not found, deleted, or not owned by the caller"
           }
         }
       }
@@ -2377,7 +2524,7 @@
         "properties": {
           "items": {
             "type": "array",
-            "description": "List of collateral registrations (1–50 items)",
+            "description": "List of collateral registrations (1\u201350 items)",
             "minItems": 1,
             "maxItems": 50,
             "items": {
@@ -2726,7 +2873,7 @@
       },
       "LoanPage": {
         "type": "object",
-        "description": "Paginated response containing a list of loan records. Fields differ slightly between cursor and offset pagination modes — see `paginationMode`.",
+        "description": "Paginated response containing a list of loan records. Fields differ slightly between cursor and offset pagination modes \u2014 see `paginationMode`.",
         "properties": {
           "data": {
             "type": "array",
@@ -2754,7 +2901,10 @@
           },
           "paginationMode": {
             "type": "string",
-            "enum": ["cursor", "offset"],
+            "enum": [
+              "cursor",
+              "offset"
+            ],
             "description": "Indicates which pagination strategy was used. `cursor` when `?cursor=` was supplied; `offset` otherwise."
           },
           "nextCursor": {
@@ -2844,7 +2994,7 @@
       },
       "HealthFactorResponse": {
         "type": "object",
-        "description": "Loan health factor response. Values ≥ 10 000 indicate a healthy loan; values < 10 000 indicate the loan is eligible for liquidation.",
+        "description": "Loan health factor response. Values \u2265 10 000 indicate a healthy loan; values < 10 000 indicate the loan is eligible for liquidation.",
         "properties": {
           "api_version": {
             "type": "string",
@@ -2853,7 +3003,7 @@
           },
           "health_factor": {
             "type": "integer",
-            "description": "Health factor scaled by 10 000 (≥10000 = healthy)"
+            "description": "Health factor scaled by 10 000 (\u226510000 = healthy)"
           }
         }
       },
@@ -3182,7 +3332,7 @@
         }
       },
       "Forbidden": {
-        "description": "Access denied — insufficient permissions",
+        "description": "Access denied \u2014 insufficient permissions",
         "content": {
           "application/json": {
             "schema": {

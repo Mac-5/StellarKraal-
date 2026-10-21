@@ -97,16 +97,92 @@ cd backend && npm install && npm run dev
 stellar contract build
 ```
 
-## Running Tests
+## Code Style
+
+All code must pass the project's linting and formatting checks before it can be merged. CI enforces these, so run them locally first to avoid failed builds.
+
+### ESLint
+
+ESLint is configured at the repository root (`.eslintrc.js` / `.eslintrc.json`) and applies to both `frontend/` and `backend/`. Run it from the relevant subdirectory:
 
 ```bash
-npm run test:frontend   # Jest component tests
-npm run test:backend    # Backend unit + integration tests
-npm run test:contract   # Soroban contract tests
-npm run test:e2e        # Playwright E2E tests
+# Lint frontend
+cd frontend && npm run lint
+
+# Lint backend
+cd backend && npm run lint
+
+# Auto-fix fixable issues
+cd frontend && npm run lint -- --fix
+```
+
+### Prettier
+
+Formatting is enforced by Prettier using the shared config (`.prettierrc`). Do not hand-format code — let Prettier do it:
+
+```bash
+# Check formatting (fails if files are not formatted)
+npx prettier --check .
+
+# Apply formatting
+npx prettier --write .
+```
+
+### Rust (contracts)
+
+Contract code must be formatted and lint-clean:
+
+```bash
+cd contracts/stellarkraal
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+> Tip: install the ESLint and Prettier editor extensions so issues surface as you type.
+
+## Testing
+
+Every PR that changes behavior **must** include tests. CI will reject PRs that drop total coverage below the required threshold.
+
+### Minimum Coverage Requirement
+
+The project enforces a **70% minimum test coverage** across the codebase. PRs that reduce coverage below 70% will fail CI. New code should be covered by tests — do not rely on existing coverage to carry new logic.
+
+Check coverage locally before pushing:
+
+```bash
+# Frontend coverage (Jest)
+cd frontend && npm run test -- --coverage
+
+# Backend coverage
+cd backend && npm run test -- --coverage
+```
+
+Review the coverage summary printed at the end of the run. If your change lowers coverage, add tests for the new branches before opening the PR.
+
+### Running the Test Suites
+
+```bash
+# Frontend — Jest component tests
+npm run test:frontend
+
+# Backend — unit + integration tests
+npm run test:backend
+
+# Smart contract — Soroban (Rust) tests
+npm run test:contract
+
+# End-to-end — Playwright
+npm run test:e2e
 ```
 
 For detailed instructions on running E2E tests locally, see [E2E Testing Guide](docs/testing/e2e-tests.md).
+
+Run the full suite before opening a PR:
+
+```bash
+npm run test:frontend && npm run test:backend && npm run test:contract
+```
 
 ## Managing Dependencies
 
@@ -246,161 +322,21 @@ Explicit review guidelines align expectations for everyone involved and help kee
 
 ---
 
+### Reviewer Checklist
+
+Reviewers should confirm each quality gate below before approving. If any item fails, request changes rather than approving.
+
+- [ ] **CI is green** — all required checks (lint, format, tests, coverage) pass.
+- [ ] **Coverage ≥ 70%** — the PR does not drop total coverage below the threshold; new logic has tests.
+- [ ] **Style clean** — ESLint and Prettier pass with no warnings suppressed; Rust code passes `cargo fmt` and `cargo clippy`.
+- [ ] **Tests present** — behavior changes include unit/integration tests; contract changes include `cargo test` coverage.
+- [ ] **Conventional Commit** — the PR title/commit follows the Conventional Commits format.
+- [ ] **ADR included** — required for ABI, storage, oracle, governance, or breaking protocol changes.
+- [ ] **No unused dependencies** — `depcheck` is clean for touched subprojects.
+- [ ] **Docs updated** — user-facing changes update relevant docs and the `[Unreleased]` changelog entry.
+
+---
+
 ### Author Responsibilities
 
-Before requesting review, the PR author should:
-
-- [ ] Self-review the diff — read every changed line as if you were a reviewer seeing it for the first time.
-- [ ] Ensure CI is green and all tests pass locally.
-- [ ] Write a clear PR description: what changed, why, and how to test it.
-- [ ] Link the issue being resolved (e.g. `Closes #1234`).
-- [ ] Keep the PR focused — one logical change per PR. Split unrelated fixes into separate PRs.
-- [ ] Respond to review comments within one business day. If a comment requires discussion, start a thread rather than leaving it unresolved.
-- [ ] Mark conversations as resolved only after addressing the feedback (not just to clear the UI).
-- [ ] Request re-review after pushing substantive changes.
-
----
-
-### Reviewer Responsibilities
-
-Reviewers are expected to:
-
-- [ ] Provide a first response within **2 business days** of the review request (see [SLA](#review-sla)).
-- [ ] Check out the branch and run the tests locally for non-trivial changes.
-- [ ] Give specific, actionable feedback — point to the line, explain the concern, and suggest an alternative when possible.
-- [ ] Distinguish between blocking issues and suggestions (see [Comment Conventions](#comment-conventions)).
-- [ ] Approve only when all blocking issues are resolved.
-- [ ] Not re-open resolved conversations without adding new information.
-
----
-
-### What to Check
-
-Review every PR against the following dimensions:
-
-#### Correctness
-- Does the code do what the PR description says it does?
-- Are edge cases (empty arrays, null values, network timeouts) handled?
-- Are error paths tested, not just the happy path?
-
-#### Tests
-- Is there a test for the new behaviour or bug fix?
-- Do the tests cover the most likely failure modes?
-- Are existing tests left green (no skipped tests without a tracked issue)?
-
-#### Security
-- Are all inputs validated and sanitized at API boundaries?
-- Are SQL queries parameterized (no string interpolation into queries)?
-- Are secrets read from environment variables, not hardcoded?
-- Does the change introduce any new permissions or access control implications?
-- Are JWTs verified before trusting their claims?
-
-#### Documentation
-- If the PR changes a public API, environment variable, or user-facing behavior, is the relevant documentation updated?
-- Are new functions and exported types documented with JSDoc or inline comments?
-
-#### Performance
-- Does the change introduce N+1 queries or unbounded loops over database results?
-- Are large payloads paginated or projected?
-- Does the change add a synchronous/blocking call on the hot path?
-
-#### Style and Maintainability
-- Is the code readable without needing to read the full diff context?
-- Are variable and function names clear?
-- Is the change consistent with the project's existing patterns (error handling style, response shapes, etc.)?
-
----
-
-### Comment Conventions
-
-Use prefixes to signal the urgency of a comment, so the author can triage quickly:
-
-| Prefix | Meaning |
-|--------|---------|
-| `blocking:` | Must be addressed before approval. This indicates a correctness, security, or test gap. |
-| `nit:` | Minor style or naming preference. Non-blocking; the author can address it or leave a reason for not doing so. |
-| `question:` | Genuine curiosity — the reviewer wants to understand the decision. Non-blocking. |
-| `suggestion:` | An alternative approach worth considering. Non-blocking; the author decides. |
-| `note:` | Context or background the author might find useful. No action required. |
-
-**Examples:**
-
-```
-blocking: This query is not parameterized. `userId` is concatenated directly into the SQL string,
-which opens a SQL injection vector. Use `db.prepare('SELECT * FROM users WHERE id = ?').get(userId)` instead.
-
-nit: Prefer `const` over `let` here since the variable is never reassigned.
-
-suggestion: We could cache this response with `setResponseCache` to avoid the extra DB round-trip
-on repeated reads. Not critical for this PR — could be a follow-up.
-```
-
----
-
-### Tone and Constructive Feedback
-
-Code review is about the code, not the person. The goal is a better product, not winning an argument.
-
-**Do:**
-- Frame concerns as questions when you're not certain ("Is this safe to do if X is null?")
-- Acknowledge good decisions ("Nice use of the existing cache here.")
-- Explain the *why* behind a blocking comment, not just the *what*.
-- Assume good intent — the author likely had a reason for their approach.
-
-**Avoid:**
-- Directives without explanation ("Change this.") — always explain why.
-- Sarcasm or condescension ("This is obviously wrong.").
-- Commenting on author style preferences unrelated to the project's conventions.
-- Piling on after another reviewer has already raised the same concern — use a 👍 reaction instead.
-
-If a review thread becomes heated or unproductive, take it to a synchronous conversation (call or pairing session) and post a summary back in the PR for the record.
-
----
-
-### Review SLA
-
-| Milestone | Target |
-|-----------|--------|
-| First response (acknowledge or initial review) | Within **2 business days** of review request |
-| Re-review after author updates | Within **1 business day** of re-review request |
-| Final approval or explicit block | Within **2 business days** of the last change set |
-
-If a reviewer cannot meet the SLA (e.g., on leave, blocked by other priorities), they should:
-1. Comment on the PR explaining the delay and expected return date.
-2. Or reassign the review to another team member.
-
-PRs that have had no reviewer activity for more than 3 business days may be escalated by the author to the #engineering Slack channel.
-
----
-
-### Minimum Approvals
-
-| Change type | Required approvals |
-|-------------|--------------------|
-| Documentation-only change | 1 |
-| Backend or frontend feature/fix | 1 |
-| Soroban contract change | 2 (including at least one smart-contract reviewer) |
-| Infrastructure / Terraform change | 2 (including at least one infrastructure reviewer) |
-| Security-sensitive change (auth, secrets, IAM) | 2 (including at least one security reviewer) |
-
----
-
-## Reviewer Checklist
-
-Before approving a pull request, reviewers should confirm:
-
-- [ ] PR title and commits follow Conventional Commits
-- [ ] Change is scoped to the linked issue (no unrelated diffs)
-- [ ] Frontend changes respect the [design token system](docs/guides/design-tokens.md) and pass light/dark mode checks
-- [ ] Backend changes include input validation at API boundaries
-- [ ] Soroban contract changes preserve backward-compatible ABI, or document a migration path
-- [ ] New/changed logic has corresponding tests (Jest, backend, or `cargo test` as applicable)
-- [ ] No secrets, private keys, or credentials are hardcoded
-- [ ] Docs updated if behavior, setup, or environment variables changed
-- [ ] CI is green
-
-## Reporting Issues
-
-- **Bugs**: Open a [GitHub issue](https://github.com/teslims2/StellarKraal-/issues/new?template=bug_report.md).
-- **Security vulnerabilities**: Follow the responsible disclosure process in [SECURITY.md](../SECURITY.md).
-- **Feature requests**: Open an issue with the `enhancement` label.
+Before requ

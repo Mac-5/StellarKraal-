@@ -210,19 +210,19 @@ describe('POST /api/v1/collateral multipart registration', () => {
     expect(response.body.details.image[0]).toMatch(/JPEG or PNG/);
   });
 
-  it('rejects an image larger than 5 MiB and removes the partial upload', async () => {
+  it('rejects an image larger than 100 KB with 413', async () => {
     const before = uploadFiles();
     const response = await multipart(
       { animal_type: 'cattle', breed: 'Holstein', age: '3', weight: '450' },
       {
-        buffer: Buffer.alloc(5 * 1024 * 1024 + 1),
+        buffer: Buffer.alloc(100 * 1024 + 1),
         filename: 'large.png',
         contentType: 'image/png',
       }
     );
 
-    expect(response.status).toBe(422);
-    expect(response.body.details.image[0]).toMatch(/5 MiB/);
+    expect(response.status).toBe(413);
+    expect(response.body.error).toBe('Payload Too Large');
     expect(uploadFiles()).toEqual(before);
   });
 

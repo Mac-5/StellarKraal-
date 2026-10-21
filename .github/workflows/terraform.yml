@@ -29,6 +29,7 @@ on:
       - develop
     paths:
       - "infrastructure/**"
+      - "terraform/**"
       - ".github/workflows/terraform.yml"
 
   push:
@@ -36,6 +37,7 @@ on:
       - main
     paths:
       - "infrastructure/**"
+      - "terraform/**"
 
 permissions:
   id-token: write   # Required for OIDC AWS authentication
@@ -85,7 +87,7 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # ── Format check ────────────────────────────────────────────────────────
+      # ── Format check (recursive covers shared modules) ──────────────────────
       - name: Terraform Format Check
         id: fmt
         run: terraform fmt -check -recursive
@@ -259,17 +261,9 @@ jobs:
           terraform workspace select production \
             || terraform workspace new production
 
-      - name: Terraform Plan — Production
-        id: plan
-        run: |
-          terraform plan \
-            -var-file="envs/production.tfvars" \
-            -no-color \
-            -out=production.tfplan \
-            -input=false
-
       - name: Terraform Apply — Production
         run: |
           terraform apply \
-            -input=false \
-            production.tfplan
+            -var-file="envs/production.tfvars" \
+            -auto-approve \
+            -input=false

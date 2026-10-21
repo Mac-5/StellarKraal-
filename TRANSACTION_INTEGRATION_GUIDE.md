@@ -231,3 +231,77 @@ updateTransaction(tx1.id, { status: "completed" });
 3. Test with real loan operations
 4. Monitor transaction history in dashboard
 5. Consider adding analytics based on transaction data
+
+## Loan State Machine & On-Chain Event Mapping
+
+This section maps every loan state transition to the Soroban contract event that emits it, so event listeners can react deterministically. Event names follow the `#[contracttype]` topic convention `("loan", <event_name>)` with the loan id as the first data field.
+
+### States
+
+| State | Description | Entry Conditions | Exit Conditions |
+|-------|-------------|------------------|-----------------|
+| `Requested` | Loan created, awaiting approval/funding | `request_loan` succeeds; collateral locked | Approved → `Approved`; cancelled → `Cancelled`; expired → `Expired` |
+| `Approved` | Lender approved, awaiting disbursement | `approve_loan` succeeds on a `Requested` loan | Disbursed → `Active`; cancelled → `Cancelled` |
+| `Active` | Principal disbursed, accruing interest | `disburse` succeeds on an `Approved` loan | Fully repaid → `Repaid`; overdue → `Defaulted`; liquidated → `Liquidated` |
+| `Repaid` | Loan fully repaid (terminal) | Final `repay` covers principal + interest | — (terminal) |
+| `Defaulted` | Loan past due without full repayment | `mark_default` after grace period on `Active` | Liquidated → `Liquidated` |
+| `Liquidated` | Collateral seized to cover debt (terminal) | `liquidate` on `Active` or `Defaulted` | — (terminal) |
+| `Cancelled` | Loan cancelled before disbursement (terminal) | `cancel_loan` on `Requested` or `Approved` | — (terminal) |
+| `Expired` | Request expired before approval (terminal) | `expire_loan` after request TTL on `Requested` | — (terminal) |
+
+### Transition → Event Mapping
+
+| From → To | Contract Method | Soroban Event Name | Event Payload |
+|-----------|-----------------|--------------------|---------------|
+| (none) → `Requested` | `request_loan` | `loan_requested` | `{ loan_id, borrower, collateral_id, amount, interest_rate, due_ledger }` |
+| `Requested` → `Approved` | `approve_loan` | `loan_approved` | `{ loan_id, lender, approved_ledger }` |
+| `Approved` → `Active` | `disburse` | `loan_disbursed` | `{ loan_id, borrower, principal, disbursed_ledger }` |
+| `Active` → `Active` | `repay` (partial) | `loan_repayment` | `{ loan_id, payer, amount, remaining_principal, remaining_interest }` |
+| `Active` → `Repaid` | `repay` (final) | `loan_repaid` | `{ loan_id, payer, total_paid, closed_ledger }` |
+| `Active` → `Defaulted` | `mark_default` | `loan_defaulted` | `{ loan_id, defaulted_ledger, outstanding_amount }` |
+| `Active`/`Defaulted` → `Liquidated` | `liquidate` | `loan_liquidated` | `{ loan_id, liquidator, collateral_id, seized_amount, repaid_amount }` |
+| `Requested`/`Approved` → `Cancelled` | `cancel_loan` | `loan_cancelled` | `{ loan_id, cancelled_by, reason }` |
+| `Requested` → `Expired` | `expire_loan` | `loan_expired` | `{ loan_id, expired_ledger }` |
+
+### Invalid Transitions and Errors
+
+Attempting a transition from a state that does not permit it reverts the transaction and emits no state-change event. The contract returns a typed error:
+
+| Attempted Transition | Condition | Error |
+|----------------------|-----------|-------|
+| `approve_loan` on non-`Requested` | Loan not in `Requested` | `LoanError::InvalidState` |
+| `disburse` on non-`Approved` | Loan not in `Approved` | `LoanError::InvalidState` |
+| `repay` on non-`Active` | Loan not in `Active` | `LoanError::InvalidState` |
+| `mark_default` before grace period | Due ledger not passed | `LoanError::NotYetDefaultable` |
+| `liquidate` on non-`Active`/`Defaulted` | Loan not liquidatable | `LoanError::InvalidState` |
+| `cancel_loan` after disbursement | Loan already `Active` | `LoanError::InvalidState` |
+| `expire_loan` before TTL | Request TTL not elapsed | `LoanError::NotYetExpired` |
+| Any transition on terminal state | `Repaid`/`Liquidated`/`Cancelled`/`Expired` | `LoanError::TerminalState` |
+
+### Full Lifecycle Timing Diagram
+
+```
+Borrower            Contract                 Lender / Liquidator        Event Listener
+   |                   |                            |                        |
+   |-- request_loan -->|                            |                        |
+   |                   |-- emit loan_requested ---------------------------->|
+   |                   |                            |                        |
+   |                   |<---------- approve_loan ----|                        |
+   |                   |-- emit loan_approved ----------------------------->|
+   |                   |                            |                        |
+   |                   |<---------- disburse --------|                        |
+   |                   |-- emit loan_disbursed ---------------------------->|
+   |                   |                            |                        |
+   |-- repay (partial)->|                           |                        |
+   |                   |-- emit loan_repayment --------------------------->|
+   |                   |                            |                        |
+   |-- repay (final) -->|                           |                        |
+   |                   |-- emit loan_repaid ------------------------------>|
+   |                   |                            |                        |
+   |  (alt: overdue)    |                            |                        |
+   |                   |-- emit loan_defaulted --------------------------->|
+   |                   |<---------- liquidate -------|                        |
+   |                   |-- emit loan_liquidated --------------------------->|
+```
+
+Event listeners should subscribe to the `("loan", *)` topic filter and dispatch on the event name. Because every transition emits exactly one event, the listener can reconstruct the loan state by replaying events in ledger order.

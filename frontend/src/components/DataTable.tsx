@@ -1,4 +1,4 @@
-"use client";
+'use client';
 /**
  * DataTable — Issue #1101
  *
@@ -9,12 +9,13 @@
  * - Sticky first column for identification on small screens
  * - aria-sort attribute on column headers
  */
-import { useCallback, useMemo } from "react";
-import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useCallback, useMemo } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+import ScrollableTable from './ScrollableTable';
 
 /* ─── Types ─────────────────────────────────────────────────── */
 
-export type SortDirection = "asc" | "desc";
+export type SortDirection = 'asc' | 'desc';
 
 export interface ColumnDef<T> {
   /** Unique key matching a field in the data row */
@@ -56,7 +57,7 @@ function SortIcon({ direction }: { direction: SortDirection | null }) {
     );
   return (
     <span aria-hidden="true" className="ml-1 text-gold text-xs select-none">
-      {direction === "asc" ? "▲" : "▼"}
+      {direction === 'asc' ? '▲' : '▼'}
     </span>
   );
 }
@@ -65,11 +66,11 @@ function SortIcon({ direction }: { direction: SortDirection | null }) {
 export default function DataTable<T extends Record<string, unknown>>({
   columns,
   data,
-  sortByParam = "sortBy",
-  sortDirParam = "sortDir",
+  sortByParam = 'sortBy',
+  sortDirParam = 'sortDir',
   rowKey,
   caption,
-  emptyMessage = "No records found.",
+  emptyMessage = 'No records found.',
 }: DataTableProps<T>) {
   const router = useRouter();
   const pathname = usePathname();
@@ -77,7 +78,7 @@ export default function DataTable<T extends Record<string, unknown>>({
 
   /* Read current sort state from URL */
   const currentSortBy = searchParams.get(sortByParam) as (keyof T & string) | null;
-  const currentSortDir = (searchParams.get(sortDirParam) as SortDirection) ?? "asc";
+  const currentSortDir = (searchParams.get(sortDirParam) as SortDirection) ?? 'asc';
 
   /* Update URL when user clicks a column header */
   const handleSort = useCallback(
@@ -85,10 +86,10 @@ export default function DataTable<T extends Record<string, unknown>>({
       const params = new URLSearchParams(searchParams.toString());
       if (currentSortBy === colKey) {
         /* Toggle direction */
-        params.set(sortDirParam, currentSortDir === "asc" ? "desc" : "asc");
+        params.set(sortDirParam, currentSortDir === 'asc' ? 'desc' : 'asc');
       } else {
         params.set(sortByParam, colKey);
-        params.set(sortDirParam, "asc");
+        params.set(sortDirParam, 'asc');
       }
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
     },
@@ -102,36 +103,30 @@ export default function DataTable<T extends Record<string, unknown>>({
       const aVal = a[currentSortBy];
       const bVal = b[currentSortBy];
       let cmp = 0;
-      if (typeof aVal === "number" && typeof bVal === "number") {
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
         cmp = aVal - bVal;
       } else {
-        cmp = String(aVal ?? "").localeCompare(String(bVal ?? ""));
+        cmp = String(aVal ?? '').localeCompare(String(bVal ?? ''));
       }
-      return currentSortDir === "asc" ? cmp : -cmp;
+      return currentSortDir === 'asc' ? cmp : -cmp;
     });
   }, [data, currentSortBy, currentSortDir]);
 
   return (
-    /* Horizontal scroll wrapper for mobile */
-    <div className="overflow-x-auto rounded-2xl shadow">
-      <table
-        className="min-w-full bg-white text-sm"
-        role="grid"
-        aria-label={caption}
-      >
-        {caption && (
-          <caption className="sr-only">{caption}</caption>
-        )}
+    /* Horizontal scroll wrapper with swipe hint for mobile (#1415) */
+    <ScrollableTable label={caption ?? 'Data table'} className="rounded-2xl shadow">
+      <table className="min-w-full bg-white text-sm" role="grid" aria-label={caption}>
+        {caption && <caption className="sr-only">{caption}</caption>}
 
         <thead className="bg-brown text-cream">
           <tr>
             {columns.map((col, idx) => {
               const isSorted = currentSortBy === col.key;
-              const ariaSort: React.AriaAttributes["aria-sort"] = isSorted
-                ? currentSortDir === "asc"
-                  ? "ascending"
-                  : "descending"
-                : "none";
+              const ariaSort: React.AriaAttributes['aria-sort'] = isSorted
+                ? currentSortDir === 'asc'
+                  ? 'ascending'
+                  : 'descending'
+                : 'none';
 
               return (
                 <th
@@ -139,21 +134,19 @@ export default function DataTable<T extends Record<string, unknown>>({
                   scope="col"
                   aria-sort={col.sortable !== false ? ariaSort : undefined}
                   className={[
-                    "px-4 py-3 text-left font-semibold whitespace-nowrap select-none",
+                    'px-4 py-3 text-left font-semibold whitespace-nowrap select-none',
                     /* Sticky first column */
-                    idx === 0 ? "sticky left-0 z-10 bg-brown" : "",
-                    col.sortable !== false
-                      ? "cursor-pointer hover:bg-brown/80 transition"
-                      : "",
-                    col.className ?? "",
+                    idx === 0 ? 'sticky left-0 z-10 bg-brown' : '',
+                    col.sortable !== false ? 'cursor-pointer hover:bg-brown/80 transition' : '',
+                    col.className ?? '',
                   ]
                     .filter(Boolean)
-                    .join(" ")}
+                    .join(' ')}
                   onClick={col.sortable !== false ? () => handleSort(col.key) : undefined}
                   onKeyDown={
                     col.sortable !== false
                       ? (e) => {
-                          if (e.key === "Enter" || e.key === " ") {
+                          if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
                             handleSort(col.key);
                           }
@@ -161,7 +154,7 @@ export default function DataTable<T extends Record<string, unknown>>({
                       : undefined
                   }
                   tabIndex={col.sortable !== false ? 0 : undefined}
-                  role={col.sortable !== false ? "button" : undefined}
+                  role={col.sortable !== false ? 'button' : undefined}
                 >
                   {col.label}
                   {col.sortable !== false && (
@@ -176,10 +169,7 @@ export default function DataTable<T extends Record<string, unknown>>({
         <tbody>
           {sortedData.length === 0 ? (
             <tr>
-              <td
-                colSpan={columns.length}
-                className="px-4 py-8 text-center text-brown/50"
-              >
+              <td colSpan={columns.length} className="px-4 py-8 text-center text-brown/50">
                 {emptyMessage}
               </td>
             </tr>
@@ -189,8 +179,8 @@ export default function DataTable<T extends Record<string, unknown>>({
                 key={rowKey(row)}
                 className={
                   rowIdx % 2 === 0
-                    ? "bg-white hover:bg-cream/60 transition"
-                    : "bg-cream/40 hover:bg-cream/70 transition"
+                    ? 'bg-white hover:bg-cream/60 transition'
+                    : 'bg-cream/40 hover:bg-cream/70 transition'
                 }
               >
                 {columns.map((col, colIdx) => {
@@ -199,21 +189,21 @@ export default function DataTable<T extends Record<string, unknown>>({
                     <td
                       key={col.key}
                       className={[
-                        "px-4 py-3 whitespace-nowrap text-brown",
+                        'px-4 py-3 whitespace-nowrap text-brown',
                         /* Sticky first column */
                         colIdx === 0
                           ? rowIdx % 2 === 0
-                            ? "sticky left-0 z-10 bg-white"
-                            : "sticky left-0 z-10 bg-cream/40"
-                          : "",
-                        col.className ?? "",
+                            ? 'sticky left-0 z-10 bg-white'
+                            : 'sticky left-0 z-10 bg-cream/40'
+                          : '',
+                        col.className ?? '',
                       ]
                         .filter(Boolean)
-                        .join(" ")}
+                        .join(' ')}
                     >
                       {col.render
                         ? col.render(cellValue, row)
-                        : (cellValue as React.ReactNode) ?? "—"}
+                        : ((cellValue as React.ReactNode) ?? '—')}
                     </td>
                   );
                 })}
@@ -222,6 +212,6 @@ export default function DataTable<T extends Record<string, unknown>>({
           )}
         </tbody>
       </table>
-    </div>
+    </ScrollableTable>
   );
 }

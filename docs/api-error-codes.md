@@ -24,6 +24,7 @@ Rate-limit and validation errors may include additional fields (`retryAfter`, `d
 | `401` | Unauthenticated — missing, expired, or invalid credentials |
 | `403` | Forbidden — authenticated but not authorised for this resource |
 | `404` | Resource not found |
+| `413` | Payload Too Large — request body exceeds the 100 KB limit |
 | `409` | Conflict — e.g. collateral already pledged |
 | `429` | Too many requests — rate limit exceeded |
 | `500` | Internal server error |
@@ -76,7 +77,7 @@ These appear in the `code` field of the response body.
 | — | 400 | `Idempotency-Key` header is required for repay requests. |
 | — | 400 | `page` must be a positive integer. |
 | — | 400 | `pageSize` must be between 1 and 100. |
-| — | 404 | `Loan <id> not found`. |
+| — | 404 | `Loan not found`. |
 
 ### Contract / Soroban Errors
 
@@ -166,4 +167,3 @@ The contract error table is synchronized with the Rust source in [`contracts/ste
 - [Rate Limits & Retry Guide](guides/rate-limits.md)
 - [Soroban error source](../backend/src/utils/sorobanErrors.ts)
 - [Error handler source](../backend/src/middleware/errorHandler.ts)
-

@@ -7,6 +7,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import logger from "../utils/logger";
 import path from "path";
+import { activeDriver, pgQuery } from "./database";
 
 const execAsync = promisify(exec);
 
@@ -74,12 +75,16 @@ export async function getMigrationStatus(): Promise<string> {
 }
 
 /**
- * Check database connectivity by running a trivial query against the SQLite file.
+ * Check database connectivity by running SELECT 1 against the configured driver.
  * Returns true if the DB is reachable, false otherwise.
  * @returns A promise that resolves to true if the database is healthy, false otherwise.
  */
 export async function checkDbHealth(): Promise<boolean> {
   try {
+    if (activeDriver === 'pg') {
+      await pgQuery('SELECT 1', []);
+      return true;
+    }
     const dbFile = process.env.DB_FILE ?? path.join(__dirname, "../../dev.sqlite3");
     await execAsync(`sqlite3 "${dbFile}" "SELECT 1;"`, { timeout: 3000 });
     return true;

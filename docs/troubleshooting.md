@@ -229,6 +229,189 @@ npm run migrate:dev --prefix backend
 
 ---
 
+## Contract Errors
+
+This section is a centralised reference for Soroban contract invocation failures. Most
+failures fall into one of three buckets: a contract-defined business rule was violated, the
+host rejected the transaction envelope, or the client could not reach the RPC at all.
+
+### 16. `HostError: Error(Contract, #N)` — contract-defined error codes
+
+**Symptom:** The RPC returns a `HostError` whose `Contract` variant carries a numeric code
+(e.g. `Error(Contract, #4)`).
+
+**Cause:** The contract's `#[contracterror]` enum returned an error. Each code maps to a
+specific business rule (insufficient collateral, loan already active, unauthorised caller,
+invalid amount, etc.).
+
+**Resolution:**
+1. Look up the code in the `ContractError` enum in `contracts/stellarkraal/src/lib.rs`.
+2. Confirm the caller address is authorised for the operation (e.g. the loan owner).
+3. Confirm the numeric inputs are within the contract's allowed range.
+4. Reproduce locally with a unit test before retrying on testnet:
+   ```bash
+   cargo test --manifest-path contracts/stellarkraal/Cargo.toml
+   ```
+
+### 17. `HostError: Error(WasmVm, InvalidAction)` — contract not initialised
+
+**Symptom:** Invocation fails with a `WasmVm` error or `MissingValue` when reading storage.
+
+**Cause:** The contract was deployed but `initialize` was never called, so required storage
+keys (admin, token addresses, config) are absent.
+
+**Resolution:**
+1. Check whether the contract is initialised:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network testnet -- initialize --help
+   ```
+2. If uninitialised, run the deployment initialisation step from
+   `docs/deployment/contract-deployment.md`.
+
+### 18. `HostError: Error(Auth, InvalidAction)` — authorisation failure
+
+**Symptom:** Invocation fails with an `Auth` error even though the transaction was signed.
+
+**Cause:** The signed account does not match the address the contract expects to authorise
+(e.g. the admin address, or the loan owner), or the required `require_auth` call was not
+included in the invocation.
+
+**Resolution:**
+1. Confirm the signing account matches the address passed to the contract.
+2. Ensure the client includes the required authorisation entries when building the
+   transaction (the `freighterClient.ts` wrapper handles this for standard flows).
+3. Re-sign and resubmit after correcting the caller.
+
+### 19. `TransactionResultCode.txINSUFFICIENT_FEE` — fee too low
+
+**Symptom:** Submission fails with `txINSUFFICIENT_FEE`.
+
+**Cause:** The fee bid is below the current network minimum, often after a surge in
+network activity.
+
+**Resolution:**
+1. Re-simulate the transaction to obtain an updated fee:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network testnet -- <fn> <args>
+   ```
+2. Increase the fee bid in the client and resubmit.
+
+---
+
+## RPC Connectivity
+
+### 20. RPC request times out
+
+**Symptom:** Contract calls hang and eventually fail with `ETIMEDOUT`, `fetch failed`, or a
+`TimeoutError` after ~30 seconds.
+
+**Cause:** The RPC endpoint is unreachable, slow, or the request payload is too large
+(e.g. an unbounded ledger range query).
+
+**Resolution:**
+1. Verify the endpoint responds:
+   ```bash
+   curl -sS -m 10 -X POST "$RPC_URL" \
+     -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+   ```
+   A healthy node returns `{"status":"healthy"}`.
+2. If the public testnet is slow, switch `RPC_URL` to a local node or an alternate provider.
+3. Reduce the scope of ledger queries (narrow the `startLedger` range) and retry.
+4. Check [Stellar Status](https://status.stellar.org/) for ongoing incidents.
+
+### 21. `ECONNREFUSED` / `ENOTFOUND` connecting to RPC
+
+**Symptom:** Immediate connection failure rather than a timeout.
+
+**Cause:** `RPC_URL` is malformed, points at a local node that is not running, or DNS
+resolution failed.
+
+**Resolution:**
+1. Print the configured value: `grep RPC_URL .env`
+2. Confirm the host resolves: `nslookup soroban-testnet.stellar.org`
+3. If using a local node, confirm it is running: `docker compose ps stellar-node`
+4. Restart the backend after correcting `RPC_URL`.
+
+### 22. `429 Too Many Requests` from the RPC
+
+**Symptom:** Intermittent `429` responses under load.
+
+**Cause:** The public RPC enforces rate limits per IP.
+
+**Resolution:**
+1. Add backoff/retry around RPC calls in the client.
+2. Cache read-only results (e.g. account balances) where possible.
+3. For sustained load, point `RPC_URL` at a dedicated provider or a local node.
+
+---
+
+## Sequence Number Mismatch
+
+### 23. `txBAD_SEQ` — resolving sequence number mismatches
+
+**Symptom:** Submission fails with `TransactionResultCode.txBAD_SEQ`, or the RPC reports
+`tx_bad_seq` in the result XDR.
+
+**Cause:** Every Stellar account has a monotonically increasing sequence number. A
+transaction is only valid if its sequence number is exactly `current + 1`. Mismatches occur
+when:
+- Two transactions are built from the same cached sequence number (concurrent submits).
+- A previous transaction was submitted but the client did not observe the result.
+- The client cached a stale sequence number across a long-running session.
+
+**Resolution:**
+1. Fetch the current on-chain sequence number:
+   ```bash
+   stellar account show --account $ACCOUNT_ID --network testnet
+   ```
+   The `sequence` field is the last *used* sequence number; the next transaction must use
+   `sequence + 1`.
+2. Rebuild the transaction with the refreshed sequence number and re-sign it.
+3. Ensure only one code path submits transactions for a given account at a time (serialise
+   submissions or use a per-account lock).
+4. If a transaction was submitted but its result was lost, query it before retrying:
+   ```bash
+   stellar tx info --hash <TX_HASH> --network testnet
+   ```
+   If it succeeded, do not resubmit — advance the local sequence number instead.
+
+---
+
+## FAQ
+
+The five most frequently reported issues, with quick answers.
+
+### Q1. Why does my contract call fail with `Error(Contract, #N)`?
+
+The contract rejected the call because a business rule was violated. Look up the code in the
+`ContractError` enum in `contracts/stellarkraal/src/lib.rs` and verify your inputs and caller
+address. See [Contract Errors](#contract-errors).
+
+### Q2. Why do I get `txBAD_SEQ` when submitting a transaction?
+
+Your transaction's sequence number does not match the account's on-chain sequence. Refresh
+the sequence number, rebuild and re-sign the transaction, and avoid concurrent submissions
+for the same account. See [Sequence Number Mismatch](#sequence-number-mismatch).
+
+### Q3. Why does the RPC call time out or return `fetch failed`?
+
+Either `RPC_URL` is wrong/unreachable or the endpoint is slow. Verify with a `getHealth`
+curl, check [Stellar Status](https://status.stellar.org/), and consider a local node. See
+[RPC Connectivity](#rpc-connectivity).
+
+### Q4. Why is the frontend stuck on loading after `docker compose up`?
+
+The frontend waits for the backend health check. Inspect `docker compose logs backend`, fix
+the underlying error, then `docker compose restart backend`. See item 10 above.
+
+### Q5. Why does `npm install` fail with `ERESOLVE`?
+
+Usually a Node.js version mismatch or stale lockfile. Confirm Node.js 20+, then remove
+`node_modules` and `package-lock.json` and reinstall. See item 1 above.
+
+---
+
 ## Freighter Wallet
 
 StellarKraal uses the [Freighter browser extension](https://www.freighter.app/) to sign
@@ -237,120 +420,4 @@ section cover the most common integration problems: extension not installed, net
 between the wallet and the app, browser popup blocking, and user-cancelled transactions.
 
 For the full Freighter integration reference — including the `freighterClient.ts` wrapper API,
-the `useWallet` hook, mock setup for tests, and network switching details — see
-**[docs/guides/freighter-integration.md](guides/freighter-integration.md)**.
-
-### 16. Freighter extension not installed or not detected — `isConnected()` returns `false`
-
-**Symptom:** The wallet connect button shows "Install Freighter" or the app reports the wallet is unavailable even after the extension is installed.
-
-**Cause:** The Freighter browser extension is either not installed, or the page loaded before the extension had time to inject its API into `window.freighter`.
-
-**Resolution:**
-- **Desktop (Chrome/Brave/Firefox):** Install or enable the [Freighter extension](https://www.freighter.app/). After installation, do a **hard refresh** (`Ctrl+Shift+R` / `Cmd+Shift+R`) to let the extension inject into the page.
-- **Mobile browsers:** Freighter is a desktop-only extension. Mobile users cannot connect a Freighter wallet directly. Use a desktop browser or check if the app offers an alternative signing flow.
-- After a fresh install, close and reopen the browser tab so the extension is fully loaded before the page runs.
-
----
-
-### 17. Wallet locked — `getAddress()` or `signTransaction()` returns an error
-
-**Symptom:** The wallet API returns a rejection or empty response when trying to fetch the public key or sign a transaction. The Freighter extension may prompt a password entry.
-
-**Cause:** The Freighter extension is installed but the wallet is locked (requires password entry before it can expose the public key or sign).
-
-**Resolution:**
-1. Click the Freighter extension icon in the browser toolbar.
-2. Unlock the wallet with your password.
-3. Return to the StellarKraal tab and retry the action. No page refresh is needed.
-
-If Freighter closes the popup before you can approve a transaction, make sure your browser isn't blocking extension popups (check popup-blocker settings).
-
----
-
-### 18. Wrong network selected in Freighter — transactions rejected or silently fail
-
-**Symptom:** Transactions are built successfully but submission fails. The frontend shows a network mismatch banner (`NetworkMismatchBanner`). Freighter may report a passphrase mismatch.
-
-**Cause:** Freighter's selected network (e.g., Mainnet) does not match the network the app is configured for via `NEXT_PUBLIC_NETWORK` (e.g., Testnet). Transaction signing requires matching network passphrases.
-
-**Resolution:**
-1. Open the Freighter extension and click the network name at the top (e.g., "Mainnet").
-2. Switch to **Testnet** (or whichever network the app is running on).
-3. If the target network is not listed, add a custom network using the RPC endpoint from your `.env` (`RPC_URL`).
-4. Reload the app — the mismatch banner should disappear.
-
-**Desktop vs mobile:** This applies only to desktop browsers. The `useNetworkMismatch` hook in `frontend/src/hooks/useNetworkMismatch.ts` detects the mismatch and surfaces the banner automatically.
-
----
-
-### 19. Transaction rejected by user — signing dialog dismissed
-
-**Symptom:** The app shows a "transaction rejected" or "user cancelled" error after a Freighter popup appears.
-
-**Cause:** The user dismissed the Freighter signing dialog, or the dialog timed out waiting for approval.
-
-**Resolution:**
-- This is expected behaviour when the user cancels. The app should display a dismissible error message and allow retrying.
-- If the popup appears but closes immediately (without user action), check whether a browser extension (e.g., ad blocker or popup manager) is closing it automatically. Temporarily disable such extensions for the StellarKraal origin.
-- If the signing popup never appears at all, ensure the extension is unlocked (see **Entry 17** above).
-
-**Error code reference:** Freighter returns a `"User declined access"` or `"Transaction was rejected"` string in the rejected promise. The `freighterClient.ts` wrapper does not swallow these — they propagate to the calling component for display.
-
----
-
-### 20. `txBAD_SEQ` after Freighter signs a transaction (wallet-side sequence number drift)
-
-**Symptom:** Freighter successfully signs a transaction but submission fails with `TransactionResultCode.txBAD_SEQ`.
-
-**Cause:** Freighter cached a stale account sequence number. This happens when multiple transactions are submitted in quick succession or when another client (CLI, a different browser tab) submitted a transaction for the same account.
-
-**Resolution:**
-1. Wait a few seconds, then retry — the frontend refetches the account's sequence number on each new transaction build.
-2. If the error persists, clear Freighter's cached account data: open Freighter → Settings → Manage Assets → select the account → clear/refresh.
-3. See also: **Entry 12** (`txBAD_SEQ` from the backend side) for backend-specific sequence handling.
-
----
-
-### 21. Freighter signing popup blocked by the browser
-
-**Symptom:** Clicking "Sign" or "Connect Wallet" triggers no visible Freighter popup. The browser may show a blocked-popup icon in the address bar. The app appears to hang until it times out with a rejection error.
-
-**Cause:** The browser's built-in popup blocker (or a browser extension such as an ad blocker or privacy tool) prevented the Freighter extension popup from opening. Browsers block extension popups when they are not triggered by a direct user gesture, or when blanket popup blocking is enabled for the origin.
-
-**Resolution:**
-
-1. **Check the browser popup blocker.**
-   - Chrome/Brave: look for the blocked popup icon (🚫) in the address bar → click it → select **"Always allow pop-ups and redirects from [origin]"** → confirm.
-   - Firefox: yellow notification bar at the top of the page → **"Allow"** → reload.
-   - Edge: click the blocked popup icon → **"Always allow"**.
-
-2. **Disable interfering extensions temporarily.**
-   - Ad blockers (uBlock Origin, AdBlock Plus), privacy tools (Privacy Badger), and popup managers can intercept extension events. Disable them for the StellarKraal origin and retry.
-   - To identify the culprit, open the browser in a private/incognito window with extensions disabled: if the popup appears there, a specific extension is the cause.
-
-3. **Ensure the sign action is triggered by a direct user gesture (click/tap).**
-   - Freighter's `signTransaction` call must originate from a user event handler. If the call is deferred (e.g., inside a `setTimeout` or `Promise.then` chain that runs after the user gesture has expired), the browser may classify it as an automatic popup and block it.
-
-4. **Verify the Freighter extension is unlocked** (see **Entry 17** above). A locked wallet may silently suppress the popup rather than prompting for a password in some browser configurations.
-
-After unblocking popups, reload the StellarKraal tab and retry the action.
-
-See **[docs/guides/freighter-integration.md](guides/freighter-integration.md)** for more on
-the `signTransaction` call flow.
-
----
-
-## Updating this guide
-
-When a new common issue is identified, add an entry under the appropriate category following the format:
-
-```
-### N. `exact error message or symptom`
-
-**Symptom:** What the developer sees.
-
-**Cause:** Root cause.
-
-**Resolution:** Step-by-step fix.
-```
+the `useWallet` hook, mock setup for tests, and

@@ -7,12 +7,22 @@ export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 export type ButtonState = 'idle' | 'loading' | 'success' | 'error';
 
+/**
+ * Variant classes cover the full interactive state matrix (#1412):
+ *  - hover:  `hover:*`
+ *  - active: `active:*` (pressed feedback)
+ *  - focus:  `focus-visible:ring-*` (WCAG 2.1 AA visible focus ring)
+ *  - disabled: handled globally via `disabled:*` utilities below
+ */
 const variantClasses: Record<ButtonVariant, string> = {
-  primary: 'bg-brown-600 text-cream-50 hover:bg-brown-700 focus-visible:ring-gold-500',
-  secondary: 'bg-gold-600 text-cream-50 hover:bg-gold-700 focus-visible:ring-gold-500',
+  primary:
+    'bg-brown-600 text-cream-50 hover:bg-brown-700 active:bg-brown-800 focus-visible:ring-gold-500',
+  secondary:
+    'bg-gold-600 text-cream-50 hover:bg-gold-700 active:bg-gold-800 focus-visible:ring-gold-500',
   ghost:
-    'border-2 border-brown-300 text-brown-700 hover:border-brown-500 hover:bg-brown-50 focus-visible:ring-brown-400',
-  danger: 'bg-error text-white hover:bg-error-dark focus-visible:ring-error',
+    'border-2 border-brown-300 text-brown-700 hover:border-brown-500 hover:bg-brown-50 active:bg-brown-100 focus-visible:ring-brown-400',
+  danger:
+    'bg-error text-white hover:bg-error-dark active:bg-error-dark focus-visible:ring-error',
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
@@ -23,9 +33,9 @@ const sizeClasses: Record<ButtonSize, string> = {
 
 const stateClasses: Record<ButtonState, string> = {
   idle: '',
-  loading: 'opacity-75',
-  success: 'bg-green-600 hover:bg-green-600 text-white',
-  error: 'bg-red-600 hover:bg-red-600 text-white',
+  loading: 'opacity-75 cursor-progress',
+  success: 'bg-green-600 hover:bg-green-600 active:bg-green-600 text-white',
+  error: 'bg-red-600 hover:bg-red-600 active:bg-red-600 text-white',
 };
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -51,6 +61,14 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 
 /**
  * Button — primary interactive element.
+ *
+ * State system (#1412):
+ *  - Every variant (primary, secondary, ghost, danger) defines hover, active,
+ *    focus-visible, and disabled styling.
+ *  - Focus uses a 2px `focus-visible` ring with a 2px offset, meeting WCAG 2.1
+ *    AA focus-visible requirements (visible, high-contrast, keyboard-only).
+ *  - Disabled buttons apply `opacity-50`, `cursor-not-allowed`, and suppress
+ *    hover/active feedback so they read as non-interactive.
  *
  * Ripple effect (#809):
  *  - Primary-variant buttons show a white 30%-opacity ripple radiating from
@@ -105,7 +123,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   const isPrimary = state === 'idle' && variant === 'primary';
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (isPrimary) triggerRipple(e);
+    if (isPrimary && !isDisabled) triggerRipple(e);
     onPointerDown?.(e);
   };
 
@@ -118,9 +136,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       onPointerDown={handlePointerDown}
       className={[
         'inline-flex items-center justify-center gap-2 font-semibold transition',
+        // Focus-visible ring: 2px ring + 2px offset for WCAG 2.1 AA visibility
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
         'focus-visible:ring-[color:var(--token-accent)]',
+        // Disabled: dim, non-interactive cursor, and no hover/active feedback
         'disabled:opacity-50 disabled:cursor-not-allowed',
+        'disabled:hover:bg-inherit disabled:active:bg-inherit',
         // Ripple class adds `position:relative; overflow:hidden` for primary only
         isPrimary ? 'btn-ripple' : '',
         state === 'idle' ? variantClasses[variant] : '',

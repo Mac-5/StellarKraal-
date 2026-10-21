@@ -7,6 +7,8 @@
  */
 import logger from '../utils/logger';
 import type { Pool as PgPool } from 'pg';
+import type { Database as SqliteDatabase } from 'sqlite3';
+import path from 'path';
 
 export type DbDriver = 'sqlite' | 'pg';
 
@@ -83,4 +85,77 @@ export async function dbHealth(): Promise<{ driver: DbDriver; healthy: boolean; 
   }
   // SQLite is always considered reachable (in-memory / file)
   return { driver: 'sqlite', healthy: true };
+}
+
+/** A single connection; all statements in a transaction use this same connection. */
+export interface DbConnection {
+  query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]>;
+}
+
+/** Resolve the SQLite file consistently with the migration runner. */
+function sqliteFile(): string {
+  if (process.env.DB_FILE) return process.env.DB_FILE;
+  if (process.env.DATABASE_URL?.startsWith('sqlite:')) {
+    return process.env.DATABASE_URL.slice('sqlite:'.length);
+  }
+  return path.join(__dirname, '../../dev.sqlite3');
+}
+
+/** Run parameterized queries on one connection, releasing it even on failure. */
+export async function withDbConnection<T>(work: (db: DbConnection) => Promise<T>): Promise<T> {
+  if (activeDriver === 'pg') {
+    if (!pgPool) throw new Error('PostgreSQL pool is unavailable');
+    const client = await pgPool.connect();
+    try {
+      return await work({
+        query: async <Row>(sql: string, params: unknown[] = []): Promise<Row[]> => {
+          const result = await client.query(sql, params);
+          return result.rows as Row[];
+        },
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  // Use the same SQLite driver as db-migrate, loaded only for SQLite deployments.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const sqlite = require('sqlite3') as typeof import('sqlite3');
+  const connection = await new Promise<SqliteDatabase>((resolve, reject) => {
+    const db = new sqlite.Database(sqliteFile(), (error) => {
+      if (error) reject(error);
+      else resolve(db);
+    });
+  });
+  connection.configure('busyTimeout', 30_000);
+  try {
+    return await work({
+      query: <Row>(sql: string, params: unknown[] = []): Promise<Row[]> =>
+        new Promise((resolve, reject) => {
+          connection.all(sql, params, (error: Error | null, rows: Row[]) => {
+            if (error) reject(error);
+            else resolve(rows);
+          });
+        }),
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      connection.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+}
+
+/** PostgreSQL transaction or SQLite's equivalent write lock (BEGIN IMMEDIATE). */
+export async function withDbTransaction<T>(work: (db: DbConnection) => Promise<T>): Promise<T> {
+  return withDbConnection(async (db) => {
+    await db.query(activeDriver === 'pg' ? 'BEGIN' : 'BEGIN IMMEDIATE');
+    try {
+      const result = await work(db);
+      await db.query('COMMIT');
+      return result;
+    } catch (error) {
+      await db.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  });
 }

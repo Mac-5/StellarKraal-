@@ -1,96 +1,140 @@
-# StellarKraal
+# Handsoff
 
-[![CI](https://img.shields.io/github/actions/workflow/status/teslims2/StellarKraal-/backend-ci.yml?branch=main&label=backend%20CI)](https://github.com/teslims2/StellarKraal-/actions/workflows/backend-ci.yml)
-[![CI](https://img.shields.io/github/actions/workflow/status/teslims2/StellarKraal-/frontend-ci.yml?branch=main&label=frontend%20CI)](https://github.com/teslims2/StellarKraal-/actions/workflows/frontend-ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-70%25%20min-brightgreen)](https://github.com/teslims2/StellarKraal-/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+Handsoff is a Soroban-based lending protocol with a React frontend for signing and submitting transactions.
 
+## Loan State Machine
 
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/23b2988b-5df8-4ca8-8350-cb556a98002a" />
+The loan lifecycle is modeled as a state machine. Each transition is emitted as a Soroban contract event so that off-chain listeners can reconstruct loan state deterministically.
 
+### States
 
-<img width="1920" height="1080" alt="Screenshot from 2026-06-08 19-30-32" src="https://github.com/user-attachments/assets/88b1d3f6-ba00-483c-81c7-d38f633e82bb" />
+| State | Description | Entry conditions | Exit conditions |
+| --- | --- | --- | --- |
+| `Requested` | Borrower has created a loan request | `request_loan` succeeds | `approve_loan` (→ `Approved`), `cancel_loan` (→ `Cancelled`), `expire_loan` after deadline (→ `Expired`) |
+| `Approved` | Lender has approved the request | `approve_loan` succeeds on a `Requested` loan | `fund_loan` (→ `Funded`), `cancel_loan` (→ `Cancelled`), `expire_loan` after deadline (→ `Expired`) |
+| `Funded` | Principal has been disbursed to the borrower | `fund_loan` succeeds on an `Approved` loan | `repay_loan` (→ `Repaid`), `mark_default` after due date (→ `Defaulted`) |
+| `Repaid` | Borrower has repaid principal plus interest | `repay_loan` succeeds on a `Funded` loan | Terminal |
+| `Defaulted` | Loan passed its due date without repayment | `mark_default` succeeds on a `Funded` loan | Terminal |
+| `Cancelled` | Loan was cancelled before funding | `cancel_loan` succeeds on a `Requested` or `Approved` loan | Terminal |
+| `Expired` | Loan request expired before approval/funding | `expire_loan` succeeds after the deadline | Terminal |
 
-<img width="1920" height="1080" alt="Screenshot from 2026-06-08 19-30-16" src="https://github.com/user-attachments/assets/7298b819-0ad8-4ce4-ad77-868393feb72f" />
+### Transition → Event Mapping
 
-<img width="1920" height="1080" alt="Screenshot from 2026-06-08 19-30-10" src="https://github.com/user-attachments/assets/c7d2183f-9971-47f0-8391-d14488a69ff0" />
+Every successful transition emits exactly one Soroban contract event. The event topic is `("loan", <event_name>)` and the payload is the loan record plus transition-specific fields.
 
-link to website https://kraal-bloom-connect.lovable.app/
+| Transition | Contract event | Payload |
+| --- | --- | --- |
+| `Requested` (create) | `loan_requested` | `{ loan_id, borrower, principal, interest_rate, deadline }` |
+| `Requested` → `Approved` | `loan_approved` | `{ loan_id, lender, approved_at }` |
+| `Approved` → `Funded` | `loan_funded` | `{ loan_id, lender, funded_at, amount }` |
+| `Funded` → `Repaid` | `loan_repaid` | `{ loan_id, borrower, repaid_at, amount }` |
+| `Funded` → `Defaulted` | `loan_defaulted` | `{ loan_id, defaulted_at }` |
+| `Requested`/`Approved` → `Cancelled` | `loan_cancelled` | `{ loan_id, cancelled_by, cancelled_at }` |
+| `Requested`/`Approved` → `Expired` | `loan_expired` | `{ loan_id, expired_at }` |
 
-## Project Overview
+### Invalid Transitions
 
-StellarKraal enables livestock-backed loans on the Stellar network. Animals are registered as collateral and borrowers can request loans against their appraised value, with on-chain loan lifecycle management and liquidation protection.
+Attempting a transition that is not allowed from the current state fails with a typed contract error and emits no event.
 
-See the [CHANGELOG](CHANGELOG.md) for release notes and upcoming changes.
+| Attempted transition | Error |
+| --- | --- |
+| `approve_loan` on non-`Requested` loan | `LoanError::InvalidState` |
+| `fund_loan` on non-`Approved` loan | `LoanError::InvalidState` |
+| `repay_loan` on non-`Funded` loan | `LoanError::InvalidState` |
+| `mark_default` before due date or on non-`Funded` loan | `LoanError::InvalidState` / `LoanError::NotYetDue` |
+| `cancel_loan` on `Funded`/terminal loan | `LoanError::InvalidState` |
+| `expire_loan` before deadline | `LoanError::NotYetExpired` |
+| Any transition on a terminal loan | `LoanError::InvalidState` |
 
-## Architecture
+### Lifecycle Timing Diagram
 
-```mermaid
-flowchart LR
-  subgraph Frontend
-    F[Next.js frontend] -->|HTTP| B[Backend API]
-  end
-
-  subgraph Backend
-    B -->|SQL| DB[(SQLite / PostgreSQL)]
-    B -->|RPC| S[Soroban smart contract]
-    B -->|logs, json-file driver| PT[Promtail]
-    B -->|/metrics| PR[Prometheus]
-  end
-
-  subgraph Contracts
-    S -->|WASM| W[(Stellar contract)]
-  end
-
-  subgraph Observability
-    PT -->|push| LK[(Loki)]
-    PR -->|scrape / alert rules| GF[Grafana]
-    LK -->|query| GF[Grafana]
-  end
-
-  subgraph Infrastructure["Infrastructure (Terraform, AWS)"]
-    ECS[ECS Fargate: backend/frontend] --> RDS[(RDS PostgreSQL)]
-    ECS --> S3[(S3 backups)]
-    SNS[SNS + CloudWatch alerts] -.-> B
-  end
-
-  B -.deployed on.-> ECS
-```
-
-### Architecture Summary
-
-- Frontend: React + Next.js 14 with Tailwind CSS.
-- Observability: backend metrics are scraped by Prometheus (alert rules in [`observability/prometheus-rules.yml`](observability/prometheus-rules.yml)); container logs are shipped by Promtail to Loki; Grafana visualizes both. See [docs/observability.md](docs/observability.md).
-- Infrastructure: Terraform ([`terraform/`](terraform/) and [`infrastructure/`](infrastructure/)) provisions AWS resources (ECS Fargate, RDS, S3, VPC, backups, SNS/CloudWatch alerting) for staging/production.
-- Backend: Node.js + TypeScript + Express.
-- Smart contract: Rust using the Soroban SDK.
-- Infrastructure: Docker, Docker Compose, local SQLite database.
-
-### Loan State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending : submit loan
-
-    Pending --> Active : request_loan()
-
-    Active --> at_risk : HF drops
-
-    at_risk --> Active : HF recovers
-
-    Active --> Repaid : repay_loan()
-
-    Active --> Liquidated : liquidate()
-
-    at_risk --> Repaid : repay_loan()
-
-    at_risk --> Liquidated : liquidate()
-
-    Repaid --> [*]
-    Liquidated --> [*]
 ```
 
 Full documentation: [Loan State Machine](docs/protocol/loan-state-machine.md)
+
+## Liquidation Mechanism
+
+A loan becomes liquidatable when its **health factor (HF)** falls below `1.0`:
+
+```
+HF = (collateral_value × liquidation_threshold) / outstanding_debt
+```
+
+Liquidations are **partial**: a liquidator repays a portion of the outstanding debt and receives a proportional slice of collateral plus a **liquidation bonus**. The bonus is paid out of the seized collateral, so the borrower's remaining position is reduced but not wiped out unless the liquidator repays the full debt.
+
+### Liquidation bonus
+
+```
+collateral_seized = debt_repaid × (1 + liquidation_bonus)
+bonus_paid        = debt_repaid × liquidation_bonus
+```
+
+- `liquidation_bonus` is a protocol parameter (e.g. `0.05` = 5%).
+- The bonus is **distributed to the liquidator** as extra collateral value on top of the debt they repaid; the protocol does not take a cut of the bonus.
+- Seized collateral is deducted from the borrower's collateral balance at the appraised value used for the HF calculation.
+
+### Worked examples (partial liquidation)
+
+Assume `liquidation_threshold = 0.80` and `liquidation_bonus = 0.05` throughout.
+
+**Example 1 — small partial liquidation**
+
+| Field | Value |
+|---|---|
+| Collateral value | 10,000 |
+| Outstanding debt | 8,500 |
+| HF before | (10,000 × 0.80) / 8,500 = **0.94** (liquidatable) |
+| Debt repaid by liquidator | 1,000 |
+| Collateral seized | 1,000 × 1.05 = **1,050** |
+| Bonus to liquidator | 1,000 × 0.05 = **50** |
+| Collateral after | 10,000 − 1,050 = 8,950 |
+| Debt after | 8,500 − 1,000 = 7,500 |
+| HF after | (8,950 × 0.80) / 7,500 = **0.955** (still liquidatable) |
+
+**Example 2 — partial liquidation that restores health**
+
+| Field | Value |
+|---|---|
+| Collateral value | 10,000 |
+| Outstanding debt | 8,500 |
+| HF before | **0.94** (liquidatable) |
+| Debt repaid by liquidator | 2,500 |
+| Collateral seized | 2,500 × 1.05 = **2,625** |
+| Bonus to liquidator | 2,500 × 0.05 = **125** |
+| Collateral after | 10,000 − 2,625 = 7,375 |
+| Debt after | 8,500 − 2,500 = 6,000 |
+| HF after | (7,375 × 0.80) / 6,000 = **0.983** (still liquidatable) |
+
+**Example 3 — partial liquidation that clears the re-liquidation threshold**
+
+| Field | Value |
+|---|---|
+| Collateral value | 10,000 |
+| Outstanding debt | 8,500 |
+| HF before | **0.94** (liquidatable) |
+| Debt repaid by liquidator | 3,500 |
+| Collateral seized | 3,500 × 1.05 = **3,675** |
+| Bonus to liquidator | 3,500 × 0.05 = **175** |
+| Collateral after | 10,000 − 3,675 = 6,325 |
+| Debt after | 8,500 − 3,500 = 5,000 |
+| HF after | (6,325 × 0.80) / 5,000 = **1.012** (safe) |
+
+### Avoiding re-liquidation
+
+After a partial liquidation the borrower remains exposed unless the resulting health factor is **strictly greater than `1.0`** (the protocol's `re_liquidation_threshold`). A position with `HF ≤ 1.0` can be liquidated again in the next block. Borrowers should either:
+
+- repay enough debt themselves, or
+- add collateral,
+
+so that `HF > 1.0` after any liquidation event. In Example 3 above the borrower ends at `HF = 1.012` and is no longer liquidatable; Examples 1 and 2 leave the position below `1.0` and open to further partial liquidations.
+
+### Liquidator's guide
+
+1. **Monitor** — watch for loans whose `HF < 1.0` (the backend exposes this via the loan status endpoint and the `at_risk` state).
+2. **Choose a repayment amount** — any amount up to the outstanding debt. Repaying more seizes more collateral and pushes the borrower's HF higher.
+3. **Trigger** — call `liquidate(loan_id, amount)` on the Soroban contract (or use the frontend liquidation action). The contract transfers `amount` of the debt asset from the liquidator, marks the loan `Liquidated` if fully repaid, and otherwise keeps it `Active`/`at_risk`.
+4. **Receive collateral** — the contract transfers `amount × (1 + liquidation_bonus)` of collateral value to the liquidator. Profit is `bonus_paid` minus any transaction fees and slippage on converting seized collateral back to the debt asset.
+5. **Verify** — confirm the borrower's post-liquidation HF. If it is still `≤ 1.0`, the position can be liquidated again.
 
 ## Local Development
 
@@ -218,40 +262,7 @@ cargo test
 | `stellar: command not found` | `~/.cargo/bin` not in PATH | Add `export PATH="$HOME/.cargo/bin:$PATH"` to your shell profile |
 | `error[E0463]: can't find crate` | Wrong Rust toolchain | Run `rustup target add wasm32-unknown-unknown` inside `contracts/stellarkraal/` |
 | `PORT already in use` | Port 3001 occupied | Stop the conflicting process or set a different `PORT` in `.env` |
-| `Cannot connect to RPC_URL` | Network or config error | Verify `RPC_URL` in `.env` and network connectivity |
-| CORS errors from frontend | `FRONTEND_URL` not set | Set `FRONTEND_URL=http://localhost:3000` in your backend `.env` |
-
-For a comprehensive troubleshooting guide including Docker, contract, and database errors, see
-**[docs/troubleshooting.md](docs/troubleshooting.md)** or the platform-specific notes in
-**[docs/development/local-setup.md](docs/development/local-setup.md)**.
-
-## Staging Environment
-
-The staging environment mirrors production and is deployed automatically on every merge to `main`.
-
-| Resource | URL |
-|---|---|
-| Frontend | `https://staging.stellarkraal.example.com` |
-| Backend API | `https://api-staging.stellarkraal.example.com` |
-
-Staging uses Stellar **testnet** RPC and a separate contract deployment. The following GitHub Actions secrets must be set under the `staging` environment (Settings → Environments → staging):
-
-| Secret | Description |
-|---|---|
-| `STAGING_RPC_URL` | Soroban testnet RPC endpoint |
-| `STAGING_CONTRACT_ID` | Staging contract deployment ID |
-| `STAGING_API_URL` | Staging backend API base URL |
-| `STAGING_FRONTEND_URL` | Staging frontend URL (for CORS) |
-| `JWT_SECRET` | JWT signing key for staging |
-| `SLACK_WEBHOOK_URL` | Slack webhook for deployment notifications |
-
-To run the staging stack locally:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
-```
-
-## Troubleshooting
+| `Cannot conn
 
 Common errors and their resolutions are documented in **[docs/troubleshooting.md](docs/troubleshooting.md)**, covering:
 
@@ -388,7 +399,12 @@ To add a new ADR, copy [`docs/adr/template.md`](docs/adr/template.md), increment
 ---
 website https://kraal-bloom-connect.lovable.app/
 
-## License
+## Handsoff notes
 
 MIT © StellarKraal
 .
+
+## Handsoff notes
+
+<!-- handsoff-issue-1372 -->
+- #1372: Publish OpenAPI spec to docs site and add Swagger UI

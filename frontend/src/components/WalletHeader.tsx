@@ -204,7 +204,7 @@ export default function WalletHeader() {
                 role="dialog"
                 aria-label="Wallet details"
                 aria-modal="true"
-                className="absolute right-0 mt-2 w-80 rounded-xl shadow-lg border z-50
+                className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl shadow-lg border z-50
                            bg-color-surface-raised border-color-border text-color-text"
               >
                 {/* Header row */}

@@ -20,7 +20,8 @@ export default function StepAmount() {
 
   const maxLoan = appraisedValue ? Math.floor(parseInt(appraisedValue) * 0.7) : 0; // 70% LTV
   // Round LTV to 2 decimal places to avoid floating-point artefacts like 74.99999999%
-  const ltvRaw = loanAmount && maxLoan ? (parseInt(loanAmount) / parseInt(appraisedValue)) * 100 : 0;
+  const ltvRaw =
+    loanAmount && maxLoan ? (parseInt(loanAmount) / parseInt(appraisedValue)) * 100 : 0;
   const ltv = ltvRaw.toFixed(2);
   const healthFactor =
     loanAmount && appraisedValue
@@ -116,7 +117,7 @@ export default function StepAmount() {
           <label className="text-sm font-medium text-brown">Loan Term</label>
           <FieldTooltip content={WIZARD_FIELD_TOOLTIPS.loanTerm} />
         </div>
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {TERM_OPTIONS.map(({ days, label, rate }) => (
             <button
               key={days}

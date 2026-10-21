@@ -24,30 +24,39 @@ jobs:
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: Run Soroban contract tests
+      - name: Run Soroban contract tests (stellarkraal)
         run: |
           cargo test --manifest-path contracts/stellarkraal/Cargo.toml
-          echo "Contract tests passed"
+          echo "stellarkraal contract tests passed"
 
-      - name: Build release WASM
+      - name: Run Soroban contract tests (lottery)
+        run: |
+          cargo test --manifest-path contracts/lottery/Cargo.toml
+          echo "lottery contract tests passed"
+
+      - name: Build release WASM (stellarkraal)
         run: |
           cargo build \
             --manifest-path contracts/stellarkraal/Cargo.toml \
             --target wasm32-unknown-unknown \
             --release
 
+      - name: Build release WASM (lottery)
+        run: |
+          cargo build \
+            --manifest-path contracts/lottery/Cargo.toml \
+            --target wasm32-unknown-unknown \
+            --release
+
       - name: Check WASM size (100 kB limit)
         run: |
-          WASM=$(find target/wasm32-unknown-unknown/release -name "*.wasm" -not -name "*.d" | head -1)
-          if [ -z "$WASM" ]; then
-            echo "::error::No WASM file found after build"
-            exit 1
-          fi
-          SIZE=$(wc -c < "$WASM")
-          LIMIT=102400
-          echo "WASM size: ${SIZE} bytes (limit: ${LIMIT} bytes)"
-          if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo "::error file=${WASM}::WASM binary exceeds 100 kB limit (${SIZE} bytes > ${LIMIT} bytes)"
-            exit 1
-          fi
-          echo "WASM size OK: ${SIZE} bytes"
+          for WASM in $(find target/wasm32-unknown-unknown/release -name "*.wasm" -not -name "*.d"); do
+            SIZE=$(wc -c < "$WASM")
+            LIMIT=102400
+            echo "WASM size: ${SIZE} bytes — ${WASM} (limit: ${LIMIT} bytes)"
+            if [ "$SIZE" -gt "$LIMIT" ]; then
+              echo "::error file=${WASM}::WASM binary exceeds 100 kB limit (${SIZE} bytes > ${LIMIT} bytes)"
+              exit 1
+            fi
+          done
+          echo "All WASM size checks passed"

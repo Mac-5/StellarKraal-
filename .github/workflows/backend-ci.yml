@@ -2,63 +2,276 @@ name: Backend CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - "backend/**"
-      - ".github/workflows/backend-ci.yml"
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - "backend/**"
-      - ".github/workflows/backend-ci.yml"
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
 
 jobs:
-  build-and-test:
-    name: Build and Test Backend
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "backend/package-lock.json"
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd backend
-          npm ci
+        run: npm ci
 
       - name: Run ESLint
         run: |
-          cd backend
-          npm run lint
-
-      - name: Compile TypeScript
-        run: |
-          cd backend
-          npm run build
-
-      - name: Run tests
-        run: |
-          cd backend
-          npm test
-
-      - name: Generate alert rules
-        run: |
-          cd backend
-          npm run generate:alert-rules
-
-      - name: Validate Prometheus rules (promtool)
-        run: |
-          if command -v promtool &>/dev/null; then
-            promtool check rules observability/prometheus-rules.yml
-          else
-            echo "promtool not available — skipping (install prometheus package to enable)"
+          if ! npm run lint; then
+            echo "::error::Lint gate failed. Run 'npm run lint' in backend/ and fix the reported issues before pushing."
+            exit 1
           fi
+
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript type check
+        run: |
+          if ! npx tsc --noEmit; then
+            echo "::error::Type-check gate failed. Run 'npx tsc --noEmit' in backend/ and resolve the type errors before pushing."
+            exit 1
+          fi
+
+  migrate:
+    name: Migrations (SQLite & PostgreSQL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run pending migrations (SQLite)
+        env:
+          DB_CLIENT: sqlite3
+          DB_FILENAME: ./ci-migrate.sqlite
+        run: |
+          if ! npm run migrate:latest; then
+            echo "::error::Migration gate failed (SQLite). Run 'npm run migrate:latest' in backend/ and fix the failing migration."
+            exit 1
+          fi
+
+      - name: Verify schema matches expectations (SQLite)
+        env:
+          DB_CLIENT: sqlite3
+          DB_FILENAME: ./ci-migrate.sqlite
+        run: |
+          if ! npm run migrate:verify; then
+            echo "::error::Schema verification failed (SQLite). Ensure migrations produce the expected schema."
+            exit 1
+          fi
+
+      - name: Run pending migrations (PostgreSQL)
+        env:
+          DB_CLIENT: pg
+        run: |
+          if ! npm run migrate:latest; then
+            echo "::error::Migration gate failed (PostgreSQL). Run 'npm run migrate:latest' in backend/ and fix the failing migration."
+            exit 1
+          fi
+
+      - name: Verify schema matches expectations (PostgreSQL)
+        env:
+          DB_CLIENT: pg
+        run: |
+          if ! npm run migrate:verify; then
+            echo "::error::Schema verification failed (PostgreSQL). Ensure migrations produce the expected schema."
+            exit 1
+          fi
+
+      - name: Verify rollback (down) support
+        env:
+          DB_CLIENT: pg
+        run: |
+          if ! npm run migrate:rollback; then
+            echo "::error::Rollback gate failed. Ensure every migration defines a working down() function."
+            exit 1
+          fi
+          if ! npm run migrate:latest; then
+            echo "::error::Re-apply after rollback failed. Migrations must be reversible and re-runnable."
+            exit 1
+          fi
+
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run pending migrations before tests
+        env:
+          DB_CLIENT: sqlite3
+          DB_FILENAME: ./ci-test.sqlite
+        run: |
+          if ! npm run migrate:latest; then
+            echo "::error::Migration gate failed. Run 'npm run migrate:latest' in backend/ and fix the failing migration before tests."
+            exit 1
+          fi
+
+      - name: Run tests with coverage
+        run: |
+          if ! npm run test:coverage; then
+            echo "::error::Test gate failed. Run 'npm run test:coverage' in backend/ and fix the failing tests before pushing."
+            exit 1
+          fi
+
+      - name: Enforce 70% coverage threshold
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = 'coverage/coverage-summary.json';
+          if (!fs.existsSync(path)) {
+            console.error('::error::Coverage summary not found at ' + path + '. Ensure test:coverage emits a json-summary report.');
+            process.exit(1);
+          }
+          const summary = JSON.parse(fs.readFileSync(path, 'utf8')).total;
+          const metrics = ['lines', 'statements', 'functions', 'branches'];
+          const threshold = 70;
+          let failed = false;
+          for (const metric of metrics) {
+            const pct = summary[metric].pct;
+            console.log(metric + ': ' + pct + '%');
+            if (pct < threshold) {
+              console.error('::error::Coverage gate failed: ' + metric + ' coverage ' + pct + '% is below the required ' + threshold + '%.');
+              failed = true;
+            }
+          }
+          if (failed) process.exit(1);
+          console.log('Coverage gate passed (>= ' + threshold + '%).');
+          "
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage/
+          if-no-files-found: ignore
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: |
+          if ! npm run build; then
+            echo "::error::Build gate failed. Run 'npm run build' in backend/ and fix the compilation errors before pushing."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-backend-${{ hashFiles('backend/Dockerfile', 'backend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-backend-
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: backend:ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Update Docker layer cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

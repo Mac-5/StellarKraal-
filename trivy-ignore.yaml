@@ -1,0 +1,16 @@
+# Trivy allowlist for container image scanning (issue #1390).
+#
+# Each entry suppresses a specific vulnerability ID from failing the build.
+# Only add entries that have been reviewed and justified below. Prefer
+# upgrading the base image or dependency over allowlisting.
+#
+# Format reference: https://trivy.dev/latest/docs/configuration/filtering/#by-finding-ids
+#
+# Example (do not uncomment without a justification):
+#
+# vulnerabilities:
+#   - id: CVE-2024-00000
+#     statement: "No fix available upstream; mitigated by network policy. Reviewed 2024-01-01."
+#
+# No allowlisted findings at this time.
+vulnerabilities: []

@@ -107,7 +107,7 @@ export default function RepaymentTimeline({
       </div>
 
       {/* Summary */}
-      <div className="mt-6 grid grid-cols-3 gap-4 text-center">
+      <div className="mt-6 grid grid-cols-3 gap-2 sm:gap-4 text-center">
         <div className="p-3 bg-success/10 rounded-lg">
           <p className="text-xs text-brown/70 mb-1">Paid</p>
           <p className="text-lg font-bold text-success">

@@ -29,6 +29,101 @@ Ensure you have the following installed on your machine before you begin:
 
 ---
 
+## Windows / WSL2 Setup
+
+This section covers setting up StellarKraal on Windows. The recommended path is **WSL2 with an Ubuntu distribution**; native Windows is supported but has more caveats (see below).
+
+### 1. Install WSL2 and Ubuntu
+
+From an elevated PowerShell prompt:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Reboot if prompted, then launch Ubuntu from the Start menu and create your Linux user. Verify you are on WSL2:
+
+```bash
+wsl.exe -l -v
+```
+
+The `VERSION` column for your Ubuntu distro should read `2`. If it reads `1`, upgrade it:
+
+```powershell
+wsl --set-version Ubuntu 2
+```
+
+### 2. Install Node.js via nvm
+
+**Inside WSL2 (Ubuntu):** use `nvm` for Linux.
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+# Reload your shell so nvm is on PATH
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm install 20
+nvm use 20
+node --version   # should print v20.x or higher
+```
+
+**Native Windows (optional):** use [nvm-windows](https://github.com/coreybutler/nvm-windows). Note that nvm-windows is a separate project from nvm and uses different commands.
+
+```powershell
+# Install nvm-windows via winget (or download the installer from the releases page)
+winget install CoreyButler.NVMforWindows
+# Open a new terminal, then:
+nvm install 20
+nvm use 20
+node --version
+```
+
+> If you develop in WSL2, install Node.js **inside WSL2** (not just on Windows). Running `npm install` from a Windows-installed Node against files in the Linux filesystem causes permission and performance problems.
+
+### 3. Docker on WSL2
+
+If you need Docker (e.g. for `stellar network start local`), install **Docker Desktop for Windows** and enable the WSL2 backend:
+
+1.  Install Docker Desktop and open **Settings → General**.
+2.  Enable **Use the WSL 2 based engine**.
+3.  Under **Settings → Resources → WSL Integration**, enable integration for your Ubuntu distro.
+4.  Restart Docker Desktop, then verify from inside WSL2:
+    ```bash
+    docker version
+    docker run --rm hello-world
+    ```
+
+**Docker socket access:** Docker Desktop exposes the daemon to WSL2 automatically. If `docker` commands fail with `permission denied while trying to connect to the Docker daemon socket`, ensure WSL integration is enabled for your distro and that your user is in the `docker` group:
+
+```bash
+sudo usermod -aG docker $USER
+# Log out and back in (or run `newgrp docker`) for the group change to apply
+```
+
+If you instead run Docker Engine natively inside WSL2 (without Docker Desktop), start it with `sudo service docker start` and confirm the socket exists at `/var/run/docker.sock`.
+
+### 4. File Permissions and Filesystem Considerations
+
+WSL2 can access both the Linux filesystem and the Windows drives mounted under `/mnt/c`, but they behave very differently:
+
+*   **Clone into the Linux filesystem.** Keep the repo under your WSL2 home directory (e.g. `~/StellarKraal-`), **not** under `/mnt/c/Users/...`. Cross-filesystem access is dramatically slower and breaks file watching, `npm install`, and executable bits.
+*   **Line endings.** Windows tools may introduce CRLF line endings, which break shell scripts and can cause noisy diffs. Configure Git to keep LF inside the repo:
+    ```bash
+    git config --global core.autocrlf input
+    ```
+    If files were already checked out with CRLF, re-normalize them:
+    ```bash
+    git rm --cached -r . && git reset --hard
+    ```
+*   **Executable bits.** Files on `/mnt/c` cannot store Unix permission bits, so scripts may lose their executable flag. Cloning into the Linux filesystem avoids this. If a script is not executable, restore it with `chmod +x <script>`.
+*   **Ownership.** If you previously cloned as `root` (e.g. via `sudo`), fix ownership with `sudo chown -R $USER:$USER ~/StellarKraal-`.
+
+### 5. Continue with the Standard Setup
+
+Once Node.js, Rust, and (optionally) Docker are working inside WSL2, continue from [Environment Configuration](#1-environment-configuration) below. All commands in the rest of this guide run inside your WSL2 Ubuntu terminal.
+
+---
+
 ## 1. Environment Configuration
 
 Clone the repository and set up the environment variables.
@@ -174,3 +269,11 @@ The frontend application will be available at `http://localhost:3000`.
 ### Frontend Issues
 *   **Error:** API requests from frontend failing with `CORS policy`.
     *   **Solution:** Ensure `FRONTEND_URL=http://localhost:3000` is set in your `.env` file and the backend server is running.
+
+### Windows / WSL2 Issues
+*   **Error:** `docker: permission denied while trying to connect to the Docker daemon socket`.
+    *   **Solution:** Enable WSL integration for your distro in Docker Desktop and add your user to the `docker` group (see [Docker on WSL2](#3-docker-on-wsl2)).
+*   **Error:** `npm install` is extremely slow or file watching does not work.
+    *   **Solution:** You are likely working under `/mnt/c`. Clone the repository into your WSL2 home directory instead.
+*   **Error:** Shell scripts fail with `bad interpreter: /bin/bash^M` or `$'\r': command not found`.
+    *   **Solution:** CRLF line endings were introduced. Set `git config --global core.autocrlf input` and re-checkout the files.

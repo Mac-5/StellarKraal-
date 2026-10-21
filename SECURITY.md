@@ -148,10 +148,5 @@ Please allow us the response timeline above before publishing your findings. If 
 The following practices are in place to protect the StellarKraal codebase:
 
 - **Dependabot** monitors `backend/`, `frontend/`, and `contracts/stellarkraal/` weekly for vulnerable dependencies. See [docs/guides/dependabot.md](docs/guides/dependabot.md).
-- **npm audit** runs every Monday via the [`npm-audit`](.github/workflows/npm-audit.yml) workflow and fails on `high` or `critical` severity findings.
-- **Secret scanning** via Gitleaks and GitHub's push protection prevents accidental secret commits. See [`docs/SECURITY_SCANNING.md`](docs/SECURITY_SCANNING.md).
-- **JWT-based authentication** for all API routes. See [docs/adr/ADR-002-jwt-auth.md](docs/adr/ADR-002-jwt-auth.md).
-- **Soroban contract audits** are documented in [`docs/security/contract-audit.md`](docs/security/contract-audit.md).
-- **Secrets management**: All secrets are stored in environment variables. See [docs/security/secrets-rotation.md](docs/security/secrets-rotation.md) for rotation procedures.
-- **Audit logs**: Admin and state-changing operations are logged to `AUDIT_LOG_DIR` for forensic analysis.
-- **Incident response**: See [docs/security/incident-response.md](docs/security/incident-response.md) for the security incident response runbook.
+- **npm audit** runs every Monday via the [`npm-audit`](.github/workflows/npm-audit.yml) workflow and also on every pull request targeting `main`. It audits `backend/` and `frontend/` in separate steps and fails the build on any `high` or `critical` severity finding. When the workflow fails, follow the [Dependabot triage guide](docs/guides/dependabot.md) to assess and remediate the finding before merging.
+- **Secret scanning** via Gitleaks and GitHub's push protection prevents acc

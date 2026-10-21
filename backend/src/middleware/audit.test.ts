@@ -66,6 +66,10 @@ describe("redact (via middleware body)", () => {
 });
 
 describe("redact (direct)", () => {
+  it("redacts raw refresh tokens accepted by the refresh endpoint", () => {
+    expect(redact({ refreshToken: "raw-refresh-token" })).toEqual({ refreshToken: "[REDACTED]" });
+  });
+
   it("redacts known sensitive fields", () => {
     const result = redact({
       borrower: "GABC",

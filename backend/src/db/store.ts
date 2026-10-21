@@ -6,11 +6,13 @@
  * Note: This is an in-memory implementation for development.
  * In production, replace with actual database queries.
  */
+import { logLoanStateTransition } from '../loanStateMachine';
 
 export interface AppraisalEntry {
   date: string;
   value: number;
   appraiser?: string;
+  appraiserNote?: string;
 }
 export type CollateralStatus = 'available' | 'pledged' | 'liquidated';
 
@@ -104,9 +106,10 @@ export function insertCollateral(
  * @param id - Collateral record ID.
  * @param value - New appraised value.
  * @param appraiser - Optional appraiser wallet address.
+ * @param appraiserNote - Optional note recorded with this appraisal.
  * @returns `true` if updated, `false` if not found or soft-deleted.
  */
-export function addAppraisal(id: string, value: number, appraiser?: string): boolean {
+export function addAppraisal(id: string, value: number, appraiser?: string, appraiserNote?: string): boolean {
   const r = collateralTable.get(id);
   if (!r || r.deletedAt !== null) return false;
   r.appraised_value = value;
@@ -114,6 +117,7 @@ export function addAppraisal(id: string, value: number, appraiser?: string): boo
     date: new Date().toISOString(),
     value,
     ...(appraiser ? { appraiser } : {}),
+    ...(appraiserNote !== undefined ? { appraiserNote } : {}),
   });
   return true;
 }
@@ -140,6 +144,63 @@ export function getAppraisalHistory(
   const total = sorted.length;
   const data = sorted.slice((safePage - 1) * cappedLimit, safePage * cappedLimit);
   return { data, total, page: safePage, limit: cappedLimit };
+}
+
+export interface AppraisalHistoryItem {
+  appraisedAt: string;
+  valueUSD: number;
+  appraiserNote: string | null;
+}
+
+/** Decode a scoped cursor. The append-only history index breaks timestamp ties. */
+export function decodeAppraisalCursor(cursor: string): { collateralId: string; date: string; index: number } | null {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(cursor)) return null;
+    const value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (
+      typeof value.collateralId !== 'string' || !value.collateralId ||
+      typeof value.date !== 'string' || isNaN(new Date(value.date).getTime()) ||
+      !Number.isSafeInteger(value.index) || value.index < 0
+    ) return null;
+    return { collateralId: value.collateralId, date: value.date, index: value.index };
+  } catch {
+    return null;
+  }
+}
+
+/** Return keyset-paginated history using (date DESC, append-only index DESC). */
+export function getAppraisalHistoryCursor(
+  id: string,
+  cursor?: string,
+  limit = 20
+): { data: AppraisalHistoryItem[]; nextCursor: string | null; hasMore: boolean } | null {
+  const record = getCollateral(id);
+  if (!record) return null;
+  const position = cursor ? decodeAppraisalCursor(cursor) : null;
+  if (cursor && (!position || position.collateralId !== id)) throw new Error('Invalid cursor');
+  const cappedLimit = Math.max(1, Math.min(limit, 50));
+  const sorted = record.appraisal_history
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => new Date(b.entry.date).getTime() - new Date(a.entry.date).getTime() || b.index - a.index)
+    .filter(({ entry, index }) => !position ||
+      new Date(entry.date).getTime() < new Date(position.date).getTime() ||
+      (new Date(entry.date).getTime() === new Date(position.date).getTime() && index < position.index));
+  const page = sorted.slice(0, cappedLimit + 1);
+  const hasMore = page.length > cappedLimit;
+  const selected = page.slice(0, cappedLimit);
+  const last = selected[selected.length - 1];
+  const nextCursor = hasMore && last
+    ? Buffer.from(JSON.stringify({ collateralId: id, date: last.entry.date, index: last.index })).toString('base64url')
+    : null;
+  return {
+    data: selected.map(({ entry }) => ({
+      appraisedAt: entry.date,
+      valueUSD: entry.value,
+      appraiserNote: entry.appraiserNote ?? null,
+    })),
+    nextCursor,
+    hasMore,
+  };
 }
 
 /**
@@ -492,12 +553,22 @@ export function getLoan(id: string): LoanRecord | undefined {
  */
 export function updateLoan(
   id: string,
-  updates: Partial<Omit<LoanRecord, 'id' | 'createdAt'>>
+  updates: Partial<Omit<LoanRecord, 'id' | 'createdAt'>>,
+  triggeredBy = 'system'
 ): LoanRecord | undefined {
   const record = loanTable.get(id);
   if (!record) return undefined;
   const updated = { ...record, ...updates };
   loanTable.set(id, updated);
+  if (record.status && updates.status && record.status !== updates.status) {
+    logLoanStateTransition({
+      loanId: id,
+      fromState: record.status,
+      toState: updates.status,
+      triggeredBy,
+      timestamp: new Date().toISOString(),
+    });
+  }
   return updated;
 }
 

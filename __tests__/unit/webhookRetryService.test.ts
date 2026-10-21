@@ -3,7 +3,6 @@ import { WebhookRetryService } from '../../src/services/webhookRetryService';
 
 describe('WebhookRetryService', () => {
   let service: WebhookRetryService;
-  let mockDb: any;
   let mockFetch: any;
 
   beforeEach(() => {
@@ -16,49 +15,27 @@ describe('WebhookRetryService', () => {
     // Mock fetch globally
     mockFetch = vi.fn();
     global.fetch = mockFetch;
-
-    // Mock db
-    mockDb = {
-      insert: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      first: vi.fn().mockReturnThis(),
-      update: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      returning: vi.fn().mockResolvedValue([{
-        id: 'del-001',
-        webhook_id: 'wh-001',
-        url: 'https://example.com/webhook',
-        payload: '{"event":"test"}',
-        attempt_number: 1,
-        max_attempts: 3,
-        status: 'pending',
-        last_error: null,
-        next_retry_at: new Date(Date.now() + 1000),
-        created_at: new Date(),
-        updated_at: new Date()
-      }])
-    };
   });
 
   describe('calculateBackoff', () => {
     it('should calculate correct backoff delay', () => {
       const service = new WebhookRetryService();
-      
+
       // Attempt 1: 1s
       expect(service['calculateBackoff'](1)).toBe(1000);
-      
+
       // Attempt 2: 2s
       expect(service['calculateBackoff'](2)).toBe(2000);
-      
+
       // Attempt 3: 4s
       expect(service['calculateBackoff'](3)).toBe(4000);
-      
+
       // Attempt 4: 8s
       expect(service['calculateBackoff'](4)).toBe(8000);
-      
+
       // Attempt 5: 16s
       expect(service['calculateBackoff'](5)).toBe(16000);
-      
+
       // Attempt 6: 16s (capped)
       expect(service['calculateBackoff'](6)).toBe(16000);
     });
@@ -155,7 +132,7 @@ describe('WebhookRetryService', () => {
   describe('exponential backoff', () => {
     it('should use exponential backoff for retries', async () => {
       const service = new WebhookRetryService();
-      
+
       // Attempt 1: 1s
       const delay1 = service['calculateBackoff'](1);
       expect(delay1).toBe(1000);
@@ -163,15 +140,15 @@ describe('WebhookRetryService', () => {
       // Attempt 2: 2s
       const delay2 = service['calculateBackoff'](2);
       expect(delay2).toBe(2000);
-      
+
       // Attempt 3: 4s
       const delay3 = service['calculateBackoff'](3);
       expect(delay3).toBe(4000);
-      
+
       // Attempt 4: 8s
       const delay4 = service['calculateBackoff'](4);
       expect(delay4).toBe(8000);
-      
+
       // Attempt 5: 16s
       const delay5 = service['calculateBackoff'](5);
       expect(delay5).toBe(16000);

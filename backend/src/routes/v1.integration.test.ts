@@ -562,6 +562,20 @@ describe('API v1 Integration Tests', () => {
     });
   });
 
+  describe('GET /api/v1 resource details', () => {
+    it('returns the stable collateral not-found error', async () => {
+      const res = await request(app).get('/api/v1/collateral/missing-collateral');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Collateral not found');
+    });
+
+    it('returns the stable loan not-found error', async () => {
+      const res = await request(app).get('/api/v1/loans/missing-loan');
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Loan not found');
+    });
+  });
+
   // ── Full Lifecycle ────────────────────────────────────────────────────────
 
   describe('Full loan lifecycle: register → request → repay → liquidate → health', () => {

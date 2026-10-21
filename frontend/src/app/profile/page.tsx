@@ -8,6 +8,8 @@ import EmptyState from '@/components/EmptyState';
 import MoneyAmount from '@/components/MoneyAmount';
 import { useWallet } from '@/hooks/useWallet';
 import { useToast } from '@/components/toast';
+import { CharCount } from '@/components/ui';
+import ScrollableTable from '@/components/ScrollableTable';
 
 interface CollateralRecord {
   id: string;
@@ -40,9 +42,7 @@ const DISPLAY_NAME_MAX = 40;
 
 export function buildReferralUrl(walletAddress: string): string {
   const base =
-    typeof window !== 'undefined'
-      ? window.location.origin
-      : 'https://stellarkraal.example.com';
+    typeof window !== 'undefined' ? window.location.origin : 'https://stellarkraal.example.com';
   return `${base}/register?ref=${walletAddress}`;
 }
 
@@ -143,7 +143,7 @@ function DisplayNameField({
       // Rollback optimistic update
       onSaved(initialName);
       toast.error(
-        e instanceof Error ? e.message : 'Failed to save display name. Please try again.',
+        e instanceof Error ? e.message : 'Failed to save display name. Please try again.'
       );
     } finally {
       setSaving(false);
@@ -173,7 +173,11 @@ function DisplayNameField({
             onKeyDown={handleKeyDown}
             maxLength={DISPLAY_NAME_MAX + 1}
             aria-label="Display name"
-            aria-describedby={validationError ? 'display-name-error' : undefined}
+            aria-describedby={
+              validationError
+                ? 'display-name-error display-name-count'
+                : 'display-name-help display-name-count'
+            }
             aria-invalid={validationError ? 'true' : 'false'}
             className="rounded-lg border border-brown/30 px-3 py-1.5 text-sm text-brown-700 dark:bg-[#2A1A08] dark:text-cream focus:outline-none focus:ring-2 focus:ring-gold"
           />
@@ -191,11 +195,18 @@ function DisplayNameField({
           >
             Cancel
           </button>
-          {validationError && (
-            <p id="display-name-error" role="alert" className="w-full text-xs text-red-600 mt-0.5">
-              {validationError}
-            </p>
-          )}
+          <div className="w-full flex items-start justify-between gap-3">
+            {validationError ? (
+              <p id="display-name-error" role="alert" className="text-xs text-red-600 mt-1">
+                {validationError}
+              </p>
+            ) : (
+              <p id="display-name-help" className="text-xs text-brown-500 mt-1">
+                Up to {DISPLAY_NAME_MAX} characters. Press Enter to save, Esc to cancel.
+              </p>
+            )}
+            <CharCount id="display-name-count" length={draft.length} max={DISPLAY_NAME_MAX} />
+          </div>
         </dd>
       </div>
     );
@@ -365,8 +376,8 @@ export default function ProfilePage() {
             />
           ) : (
             <Card>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <ScrollableTable label="Collateral table">
+                <table className="w-full min-w-[480px] text-sm">
                   <thead>
                     <tr className="text-left text-brown-500 border-b border-brown-100 dark:border-brown-700">
                       <th className="px-4 py-2 font-medium">Species</th>
@@ -396,7 +407,7 @@ export default function ProfilePage() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             </Card>
           )}
         </section>
@@ -434,8 +445,8 @@ export default function ProfilePage() {
             />
           ) : (
             <Card>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <ScrollableTable label="Loan history table">
+                <table className="w-full min-w-[480px] text-sm">
                   <thead>
                     <tr className="text-left text-brown-500 border-b border-brown-100 dark:border-brown-700">
                       <th className="px-4 py-2 font-medium">Loan ID</th>
@@ -472,7 +483,7 @@ export default function ProfilePage() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             </Card>
           )}
         </section>

@@ -1,99 +1,89 @@
-name: Deploy to Staging
+name: Deploy to Staging (ECS Fargate)
+
+# Automates the ECS Fargate deployment that previously ran as a manual step
+# after CI passed. Triggers on a successful push to main (i.e. after the
+# container-registry workflow builds and pushes the new image), updates the
+# ECS task definition with the freshly built image digest, rolls the service
+# with a rolling update, and waits for stability before marking success.
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - Build and Push to GHCR
+    types:
+      - completed
     branches:
       - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  ECS_TASK_DEFINITION: ${{ vars.ECS_TASK_DEFINITION }}
+  CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/stellarkraal-backend
 
 jobs:
-  test:
-    name: Lint and Test
+  deploy:
     runs-on: ubuntu-latest
+    # Only deploy when the upstream build succeeded (or on manual dispatch).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install Frontend Dependencies
-        working-directory: ./frontend
-        run: npm ci
-
-      - name: Lint Frontend
-        working-directory: ./frontend
-        run: npm run lint
-
-      - name: Run Frontend Tests
-        working-directory: ./frontend
-        run: npm test -- --watchAll=false
-
-      - name: Install Backend Dependencies
-        working-directory: ./backend
-        run: npm ci
-
-      - name: Lint Backend
-        working-directory: ./backend
-        run: npm run lint
-
-      - name: Run Backend Tests
-        working-directory: ./backend
-        run: npm test -- --watchAll=false
-
-  deploy-staging:
-    name: Deploy to Staging
-    needs: test
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Deploy with Docker Compose (staging)
+      - name: Resolve image digest
+        id: image
         run: |
-          docker compose \
-            -f docker-compose.yml \
-            -f docker-compose.staging.yml \
-            up -d --build
-        env:
-          STAGING_RPC_URL: ${{ secrets.STAGING_RPC_URL }}
-          STAGING_CONTRACT_ID: ${{ secrets.STAGING_CONTRACT_ID }}
-          STAGING_API_URL: ${{ secrets.STAGING_API_URL }}
-          STAGING_FRONTEND_URL: ${{ secrets.STAGING_FRONTEND_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          # The build workflow tags main pushes with the branch name and a
+          # short SHA. Resolve the immutable digest for the main tag so the
+          # task definition pins an exact image rather than a mutable tag.
+          DIGEST=$(docker buildx imagetools inspect "$BACKEND_IMAGE:main" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image=$BACKEND_IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Run smoke tests
-        working-directory: ./backend
-        run: npm run test:smoke
-
-  notify:
-    name: Slack Notification
-    needs: deploy-staging
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Send Slack Notification
-        uses: slackapi/slack-github-action@v1.25.0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          payload: |
-            {
-              "text": "Staging Deployment Status: ${{ needs.deploy-staging.result }}",
-              "attachments": [
-                {
-                  "color": "${{ needs.deploy-staging.result == 'success' && '#36a64f' || '#ff0000' }}",
-                  "blocks": [
-                    {
-                      "type": "section",
-                      "text": {
-                        "type": "mrkdwn",
-                        "text": "*Project:* StellarKraal\n*Environment:* Staging\n*Status:* ${{ needs.deploy-staging.result }}\n*Workflow:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_DEFINITION" \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Render task definition with new image digest
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.image }}
+
+      - name: Deploy to ECS and wait for stability
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          # Blocks until the service reaches a steady state (rolling update).
+          wait-for-service-stability: true
+
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set; skipping notification."
+            exit 0
+          fi
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\":rotating_light: Staging deploy failed for ${{ github.repository }} (${{ env.ECS_SERVICE }}). See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

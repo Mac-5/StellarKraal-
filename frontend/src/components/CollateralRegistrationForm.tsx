@@ -8,8 +8,19 @@ import { submitVariants } from '@/lib/animations';
 import { classifyApiError } from '@/lib/apiErrorToast';
 import { throwIfNotOk } from '@/lib/api';
 import { signTransaction } from '@/lib/freighterClient';
+import { submitSignedXdr } from '@/lib/stellarUtils';
+import { useToast } from '@/components/toast';
+import {
+  Button,
+  ErrorSummary,
+  FieldError,
+  HelperText,
+  Input,
+  Select,
+  toSummaryErrors,
+} from '@/components/ui';
 import { useNetworkStatus } from '@/hooks/useNetworkStatus';
-import { useTransactionStatus } from '@/hooks/useTransactionStatus';
+import { useTransactionStatus, type TransactionStatus } from '@/hooks/useTransactionStatus';
 
 interface Props {
   walletAddress: string;
@@ -47,6 +58,9 @@ const FIELD_IDS: Record<keyof FormData, string> = {
 const BASIC_FIELDS: Array<keyof FormData> = ['animalType', 'quantity'];
 const VALUATION_FIELDS: Array<keyof FormData> = ['appraisedValue', 'image'];
 const ALL_FIELDS: Array<keyof FormData> = [...BASIC_FIELDS, ...VALUATION_FIELDS];
+const QUANTITY_MAX = 10_000;
+const IMAGE_MAX_MB = 5;
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 export default function CollateralRegistrationForm({ walletAddress, onSuccess }: Props) {
   const reduced = useReducedMotion();
@@ -55,6 +69,9 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [formData, setFormData] = useState<FormData>(INITIAL_FORM_DATA);
   const [errors, setErrors] = useState<FormErrors>({});
+  // Fields the user has left at least once. Errors first appear on blur; after
+  // that they update live so the user sees the moment a value becomes valid.
+  const [touched, setTouched] = useState<Partial<Record<keyof FormData, boolean>>>({});
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [submitCount, setSubmitCount] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -62,13 +79,11 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [successId, setSuccessId] = useState<string | null>(null);
+  const [, setSuccessId] = useState<string | null>(null);
   const [pendingHash, setPendingHash] = useState<string | null>(null);
   const [pendingError, setPendingError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   // Image upload and drag-and-drop state
-  const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -162,27 +177,30 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
       }
 
       if (name === 'quantity') {
+        if (!value) return 'Enter how many animals you are registering.';
         const quantity = Number(value);
-        return !value || !Number.isInteger(quantity) || quantity <= 0
-          ? 'Quantity must be a positive whole number'
-          : undefined;
+        if (!Number.isInteger(quantity)) return 'Enter a whole number of animals (no decimals).';
+        if (quantity < 1 || quantity > QUANTITY_MAX)
+          return `Enter a count between 1 and ${QUANTITY_MAX.toLocaleString('en-US')}.`;
+        return undefined;
       }
 
       if (name === 'appraisedValue') {
+        if (!value) return 'Enter the appraised value in stroops.';
         const appraisedValue = Number(value);
-        return !value || !Number.isInteger(appraisedValue) || appraisedValue <= 0
-          ? 'Appraised value must be a positive whole number'
-          : undefined;
+        if (!Number.isInteger(appraisedValue))
+          return 'Enter a whole number of stroops (1 XLM = 10,000,000 stroops).';
+        if (appraisedValue <= 0) return 'Enter an appraised value greater than 0 stroops.';
+        return undefined;
       }
 
-      if (!value) return 'Animal photo is required';
-      if (!(value instanceof File)) return 'Animal photo is required';
+      if (!value || !(value instanceof File)) return 'Add a photo of the animals to continue.';
 
-      const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-      if (!validTypes.includes(value.type)) {
-        return 'Only JPEG, PNG, WebP, or GIF images are allowed';
+      if (!IMAGE_TYPES.includes(value.type)) {
+        return 'Choose a JPEG, PNG, WebP, or GIF image.';
       }
-      if (value.size > 5 * 1024 * 1024) return 'Animal photo must be smaller than 5MB';
+      if (value.size > IMAGE_MAX_MB * 1024 * 1024)
+        return `Choose an image smaller than ${IMAGE_MAX_MB} MB (this one is ${(value.size / (1024 * 1024)).toFixed(1)} MB).`;
 
       return undefined;
     },
@@ -191,15 +209,25 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
 
   const handleChange = (name: keyof FormData, value: string | File | null) => {
     setFormData((previous) => ({ ...previous, [name]: value }));
-    setErrors((previous) => ({ ...previous, [name]: validateField(name, value) }));
+    // Picking a file or an option is a complete action, so validate right away.
+    // Typed fields wait for the first blur before showing errors.
+    const immediate = name === 'image' || name === 'animalType';
+    if (immediate) setTouched((previous) => ({ ...previous, [name]: true }));
+    if (immediate || touched[name] || errors[name]) {
+      setErrors((previous) => ({ ...previous, [name]: validateField(name, value) }));
+    }
   };
 
   const handleBlur = (name: keyof FormData) => {
+    setTouched((previous) => ({ ...previous, [name]: true }));
     setErrors((previous) => ({
       ...previous,
       [name]: validateField(name, formData[name]),
     }));
   };
+
+  /** True once a blurred field holds a valid value — drives the success indicator. */
+  const isValid = (name: keyof FormData) => !!touched[name] && !errors[name];
 
   const processFile = (file: File | null) => {
     handleChange('image', file);
@@ -283,6 +311,9 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
     return Object.keys(fieldErrors).length === 0;
   };
 
+  const stepFields = currentStep === 1 ? BASIC_FIELDS : ALL_FIELDS;
+  const visibleErrors = Object.fromEntries(stepFields.map((field) => [field, errors[field]]));
+
   const moveBack = () => {
     setSubmitAttempted(false);
     setCurrentStep(1);
@@ -305,7 +336,7 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
     setLoading(true);
     setPendingError(null);
     try {
-      const res = await fetch(`${API}/api/v1/collateral/register`, {
+      const response = await fetch(`${API}/api/v1/collateral/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -325,6 +356,7 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
       localStorage.removeItem(STORAGE_KEY);
       setLastSaved(null);
       setErrors({});
+      setTouched({});
       setSubmitAttempted(false);
     } catch (e) {
       const { variant, message } = classifyApiError(e);
@@ -335,13 +367,14 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
     }
   };
 
-  function handleTxTerminal(status: "confirmed" | "failed", errorCode?: string) {
-    if (status === "confirmed" && pendingHash) {
+  function handleTxTerminal(status: TransactionStatus, errorCode?: string) {
+    if (status === 'confirmed' && pendingHash) {
       setSuccessId(pendingHash);
       onSuccess?.(pendingHash);
-    } else if (status === "failed") {
-      setPendingError(errorCode ? `Transaction failed: ${errorCode}` : 'Transaction failed');
-      toast.error(pendingError);
+    } else if (status === 'failed') {
+      const message = errorCode ? `Transaction failed: ${errorCode}` : 'Transaction failed';
+      setPendingError(message);
+      toast.error(message);
     }
     setPendingHash(null);
   }
@@ -432,7 +465,10 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
           {currentStep === 1 ? 'Basic Info' : 'Valuation & Photo'}
         </h3>
 
-        <ErrorSummary errors={submitAttempted ? toSummaryErrors(visibleErrors, FIELD_IDS) : []} submitCount={submitCount} />
+        <ErrorSummary
+          errors={submitAttempted ? toSummaryErrors(visibleErrors, FIELD_IDS) : []}
+          submitCount={submitCount}
+        />
 
         {currentStep === 1 ? (
           <section aria-labelledby={STEP_HEADING_ID} className="space-y-4">
@@ -444,6 +480,7 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
               onChange={(event) => handleChange('animalType', event.target.value)}
               onBlur={() => handleBlur('animalType')}
               error={errors.animalType}
+              helperText="The type of livestock you are pledging as collateral."
               disabled={loading}
             >
               {ANIMAL_TYPES.map((type) => (
@@ -463,8 +500,12 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
               placeholder="Number of animals"
               value={formData.quantity}
               onChange={(event) => handleChange('quantity', event.target.value)}
+              max={QUANTITY_MAX}
+              inputMode="numeric"
               onBlur={() => handleBlur('quantity')}
               error={errors.quantity}
+              success={isValid('quantity')}
+              helperText={`Whole number between 1 and ${QUANTITY_MAX.toLocaleString('en-US')}.`}
               disabled={loading}
             />
           </section>
@@ -480,8 +521,11 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
               placeholder="Total value in stroops"
               value={formData.appraisedValue}
               onChange={(event) => handleChange('appraisedValue', event.target.value)}
+              inputMode="numeric"
               onBlur={() => handleBlur('appraisedValue')}
               error={errors.appraisedValue}
+              success={isValid('appraisedValue')}
+              helperText="Whole number of stroops (1 XLM = 10,000,000 stroops). You can borrow up to 70% of this."
               disabled={loading}
             />
 
@@ -524,12 +568,16 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
                     disabled={loading}
                     className="sr-only"
                     aria-invalid={!!errors.image}
-                    aria-describedby={errors.image ? `${FIELD_IDS.image}-error` : undefined}
+                    aria-describedby={
+                      errors.image ? `${FIELD_IDS.image}-error` : `${FIELD_IDS.image}-helper`
+                    }
                   />
                   <div className="flex flex-col items-center text-center pointer-events-none">
                     <svg
                       className={`w-10 h-10 mb-3 transition-colors ${
-                        isDragging ? 'text-gold-600 dark:text-gold-400' : 'text-brown-400 dark:text-brown-300'
+                        isDragging
+                          ? 'text-gold-600 dark:text-gold-400'
+                          : 'text-brown-400 dark:text-brown-300'
                       }`}
                       fill="none"
                       stroke="currentColor"
@@ -555,7 +603,7 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
                   </div>
                 </div>
               ) : (
-                <div className="relative mt-3 rounded-xl border border-brown-200 dark:border-brown-700 p-3 bg-brown-50/20 dark:bg-brown-900/20 w-fit">
+                <div className="relative mt-3 rounded-xl border border-brown-200 dark:border-brown-700 p-3 bg-brown-50/20 dark:bg-brown-900/20 w-full sm:w-fit">
                   <input
                     key={fileInputKey}
                     ref={imageInputRef}
@@ -569,15 +617,15 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
                     aria-invalid={!!errors.image}
                     aria-describedby={errors.image ? `${FIELD_IDS.image}-error` : undefined}
                   />
-                  <div className="flex items-start gap-4">
+                  <div className="flex flex-col items-start gap-4 sm:flex-row">
                     <img
                       src={imagePreview}
                       alt={`${formData.animalType} animal photo preview`}
                       className="max-h-48 rounded-lg border border-brown-200 dark:border-brown-600 object-cover shadow-sm"
                     />
-                    <div className="flex flex-col justify-between self-stretch pr-8">
+                    <div className="flex min-w-0 flex-col justify-between self-stretch pr-8">
                       <div>
-                        <p className="text-sm font-semibold text-brown-800 dark:text-cream-100">
+                        <p className="text-sm font-semibold text-brown-800 dark:text-cream-100 break-all">
                           {formData.image?.name || 'Selected photo'}
                         </p>
                         {formData.image?.size ? (
@@ -605,11 +653,16 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
                     className="absolute right-2 top-2 rounded-full bg-error p-1.5 text-white hover:bg-error/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-error focus-visible:ring-offset-2"
                     aria-label="Remove animal photo"
                   >
-                    <span aria-hidden="true" className="text-xs leading-none">✕</span>
+                    <span aria-hidden="true" className="text-xs leading-none">
+                      ✕
+                    </span>
                   </button>
                 </div>
               )}
 
+              <HelperText id={`${FIELD_IDS.image}-helper`}>
+                A clear photo of the animals helps the appraiser verify your collateral.
+              </HelperText>
               <FieldError id={`${FIELD_IDS.image}-error`} message={errors.image} />
             </div>
           </section>
@@ -681,7 +734,11 @@ export default function CollateralRegistrationForm({ walletAddress, onSuccess }:
       )}
 
       {pendingHash && (
-        <div className="p-3 rounded-xl text-sm bg-amber-50 border border-amber-200 text-amber-800" role="status" aria-live="polite">
+        <div
+          className="p-3 rounded-xl text-sm bg-amber-50 border border-amber-200 text-amber-800"
+          role="status"
+          aria-live="polite"
+        >
           <p className="font-medium">Transaction pending confirmation...</p>
           <p className="font-mono text-xs mt-1 break-all">{pendingHash}</p>
           {pendingError && <p className="text-red-600 mt-1">{pendingError}</p>}

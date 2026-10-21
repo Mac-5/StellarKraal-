@@ -12,6 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Shared modules plus environment root modules. Each directory is
+        # formatted, initialised (without a backend) and validated so that
+        # staging and production stay in parity with the shared modules.
+        directory:
+          - modules/networking
+          - modules/ecs
+          - modules/rds
+          - modules/s3
+          - modules/monitoring
+          - staging
+          - production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,34 +34,29 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Format
-        run: terraform fmt -recursive
-        working-directory: ./terraform
-
-      - name: Commit and Push changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          if ! git diff --cached --quiet; then
-            git commit -m "style: automatic terraform formatting"
-            git push
-          else
-            echo "No formatting changes needed."
-          fi
+        run: terraform fmt -check -recursive
+        working-directory: ./terraform/${{ matrix.directory }}
 
       - name: Terraform Init
         run: terraform init -backend=false
-        working-directory: ./terraform
+        working-directory: ./terraform/${{ matrix.directory }}
 
       - name: Terraform Validate
         run: terraform validate
-        working-directory: ./terraform
+        working-directory: ./terraform/${{ matrix.directory }}
 
-      - name: TFLint
+  tflint:
+    name: 'TFLint'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
         with:
           tflint_version: v0.50.0
 
       - name: Run TFLint
-        run: tflint -f compact
+        run: tflint -f compact --recursive
         working-directory: ./terraform

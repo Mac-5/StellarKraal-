@@ -5,20 +5,22 @@
  *   1. GET  /api/auth/challenge  — returns a one-time challenge nonce
  *   2. POST /api/auth/login      — client submits { walletAddress, signedChallenge: { nonce, signature } }
  *                                  backend verifies Stellar ed25519 signature, issues JWT + refresh token
- *   3. POST /api/v1/auth/refresh — exchanges a valid httpOnly refresh token cookie for a new JWT
- *                                  and a rotated refresh token cookie; old token is invalidated
+ *   3. POST /api/v1/auth/refresh — exchanges a body token or httpOnly cookie for a new JWT
+ *                                  and a rotated refresh token; old token is invalidated in the DB
  *
  * Access tokens expire in ACCESS_TTL_MS (default 15 min).
- * Refresh tokens expire in REFRESH_TTL_MS (default 7 days) and are stored as SHA-256 hashes.
+ * Refresh tokens expire in REFRESH_TTL_MS (default 7 days) and are stored in the DB as SHA-256 hashes.
  * Revoked/rotated tokens are stored in a blocklist to prevent reuse attacks.
  * All POST/PUT/DELETE routes (except auth endpoints) require a valid JWT.
  */
 import { Request, Response, NextFunction, Router } from 'express';
-import { createHmac, createHash, randomBytes } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
 import { config } from '../config';
 import { getProfile, updateProfile } from '../db/store';
+import { insertRefreshToken, rotateRefreshToken, _clearRefreshTokens } from '../db/refreshTokens';
 import { hashRefreshToken, revokeToken, isTokenBlocked } from '../utils/tokenBlocklist';
+import { asyncHandler } from '../utils/asyncHandler';
 import logger from '../utils/logger';
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -60,8 +62,6 @@ function verifyJwt(token: string): Record<string, unknown> {
 
 // challenge → expiry
 const challenges = new Map<string, number>();
-// tokenHash → { publicKey, expiry }
-const refreshTokens = new Map<string, { publicKey: string; exp: number }>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -71,11 +71,11 @@ const refreshTokens = new Map<string, { publicKey: string; exp: number }>();
  * @param publicKey - Stellar wallet public key for the user.
  * @returns Access token string and raw refresh token (to be set as cookie).
  */
-function issueTokens(publicKey: string): { accessToken: string; rawRefresh: string; expiresIn: number } {
+async function issueTokens(publicKey: string): Promise<{ accessToken: string; rawRefresh: string; expiresIn: number }> {
   const now = Date.now();
   const accessToken = signJwt({ sub: publicKey, iat: Math.floor(now / 1000), exp: Math.floor((now + ACCESS_TTL_MS) / 1000) });
   const rawRefresh = randomBytes(32).toString('hex');
-  refreshTokens.set(hashRefreshToken(rawRefresh), { publicKey, exp: now + REFRESH_TTL_MS });
+  await insertRefreshToken(hashRefreshToken(rawRefresh), publicKey, now + REFRESH_TTL_MS);
   return { accessToken, rawRefresh, expiresIn: ACCESS_TTL_MS / 1000 };
 }
 
@@ -182,6 +182,9 @@ authRouter.get('/challenge', (_req: Request, res: Response) => {
  *                   type: string
  *                   description: JWT access token
  *                   example: eyJhbGci...
+ *                 refreshToken:
+ *                   type: string
+ *                   description: Single-use refresh token, valid for 7 days by default
  *                 expiresIn:
  *                   type: integer
  *                   description: Access token validity period in seconds
@@ -191,7 +194,7 @@ authRouter.get('/challenge', (_req: Request, res: Response) => {
  *       '401':
  *         $ref: '#/components/responses/Unauthorized'
  */
-authRouter.post('/login', (req: Request, res: Response) => {
+authRouter.post('/login', asyncHandler(async (req: Request, res: Response) => {
   const { walletAddress, signedChallenge } = req.body as {
     walletAddress?: string;
     signedChallenge?: { nonce?: string; signature?: string };
@@ -226,10 +229,10 @@ authRouter.post('/login', (req: Request, res: Response) => {
     updateProfile(walletAddress, {});
   }
 
-  const { accessToken, rawRefresh, expiresIn } = issueTokens(walletAddress);
+  const { accessToken, rawRefresh, expiresIn } = await issueTokens(walletAddress);
   setRefreshCookie(res, rawRefresh);
-  res.json({ accessToken, expiresIn });
-});
+  res.json({ accessToken, refreshToken: rawRefresh, expiresIn });
+}));
 
 /**
  * @openapi
@@ -238,9 +241,20 @@ authRouter.post('/login', (req: Request, res: Response) => {
  *     tags:
  *       - auth
  *     summary: Rotate refresh token
- *     description: Reads the refresh token from the refreshToken httpOnly cookie, validates it, and issues a new access token and rotated cookie. Old token is added to blocklist to prevent reuse attacks.
+ *     description: Accepts a refreshToken in the JSON body or the existing httpOnly cookie. Atomically consumes the stored SHA-256 digest and issues a short-lived access token and a new refresh token (7 days by default). Reusing the old token returns 401.
  *     operationId: refreshToken
  *     security: []
+ *     requestBody:
+ *       required: false
+ *       description: Refresh token; may instead be supplied via the refreshToken cookie.
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *                 description: Raw refresh token issued at login or by a previous rotation
  *     responses:
  *       '200':
  *         description: Token rotated successfully
@@ -254,6 +268,9 @@ authRouter.post('/login', (req: Request, res: Response) => {
  *                   type: string
  *                   description: JWT access token
  *                   example: eyJhbGci...
+ *                 refreshToken:
+ *                   type: string
+ *                   description: Single-use refresh token, valid for 7 days by default
  *                 expiresIn:
  *                   type: integer
  *                   description: Access token validity in seconds
@@ -263,13 +280,13 @@ authRouter.post('/login', (req: Request, res: Response) => {
  *       '401':
  *         $ref: '#/components/responses/Unauthorized'
  */
-authRouter.post('/refresh', (req: Request, res: Response) => {
+authRouter.post('/refresh', asyncHandler(async (req: Request, res: Response) => {
   const cookieHeader = req.headers.cookie ?? '';
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${REFRESH_COOKIE}=([^;]+)`));
-  const rawToken = match?.[1];
+  const rawToken = req.body?.refreshToken ?? match?.[1];
 
-  if (!rawToken) {
-    return res.status(400).json({ error: 'MISSING_TOKEN', message: 'Refresh token cookie is required' });
+  if (typeof rawToken !== 'string' || !rawToken.trim()) {
+    return res.status(400).json({ error: 'MISSING_TOKEN', message: 'A refresh token is required in the body or cookie' });
   }
 
   const tokenHash = hashRefreshToken(rawToken);
@@ -283,26 +300,26 @@ authRouter.post('/refresh', (req: Request, res: Response) => {
     return res.status(401).json({ error: 'INVALID_TOKEN', message: 'Refresh token has been revoked' });
   }
 
-  const entry = refreshTokens.get(tokenHash);
-
-  if (!entry || Date.now() > entry.exp) {
+  const rawRefresh = randomBytes(32).toString('hex');
+  const now = Date.now();
+  const publicKey = await rotateRefreshToken(tokenHash, hashRefreshToken(rawRefresh), now + REFRESH_TTL_MS);
+  if (!publicKey) {
     return res.status(401).json({ error: 'INVALID_TOKEN', message: 'Refresh token is invalid or expired' });
   }
 
-  // Rotate: invalidate old token by adding to blocklist, issue new pair
+  // The database transaction is authoritative across processes and restarts.
+  // Keep the existing blocklist as a fast local rejection of reuse attempts.
   revokeToken(tokenHash, 'rotated');
-  refreshTokens.delete(tokenHash);
-  
-  const { accessToken, rawRefresh, expiresIn } = issueTokens(entry.publicKey);
+  const accessToken = signJwt({ sub: publicKey, iat: Math.floor(now / 1000), exp: Math.floor((now + ACCESS_TTL_MS) / 1000) });
   setRefreshCookie(res, rawRefresh);
-  
+
   logger.info('Refresh token rotated successfully', {
-    publicKey: entry.publicKey,
+    publicKey,
     oldTokenHash: tokenHash.slice(0, 8) + '...',
   });
-  
-  res.json({ accessToken, expiresIn });
-});
+
+  res.json({ accessToken, refreshToken: rawRefresh, expiresIn: ACCESS_TTL_MS / 1000 });
+}));
 
 // ── JWT middleware ────────────────────────────────────────────────────────────
 
@@ -312,6 +329,7 @@ const PROTECTED_GET_PATTERNS = [
   /^\/api\/collateral$/,
   /^\/api\/v1\/loans\/summary$/,
   /^\/api\/v1\/profile$/,
+  /^\/api\/v1\/collateral\/[^/]+\/appraisals\/?$/,
 ];
 
 /**
@@ -354,7 +372,10 @@ export function jwtMiddleware(req: Request, res: Response, next: NextFunction): 
 
   try {
     const payload = verifyJwt(authHeader.slice(7));
-    (req as Request & { user: { publicKey: unknown } }).user = { publicKey: payload.sub };
+    (req as Request & { user: { publicKey: unknown; role?: string } }).user = {
+      publicKey: payload.sub,
+      role: typeof payload.role === 'string' ? payload.role : undefined,
+    };
     next();
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'unknown';
@@ -362,7 +383,7 @@ export function jwtMiddleware(req: Request, res: Response, next: NextFunction): 
   }
 }
 
-/** Exported for testing only — clears in-memory refresh token store. */
-export function _resetRefreshTokens(): void {
-  refreshTokens.clear();
+/** Exported for testing only — clears the persistent refresh token store. */
+export async function _resetRefreshTokens(): Promise<void> {
+  await _clearRefreshTokens();
 }

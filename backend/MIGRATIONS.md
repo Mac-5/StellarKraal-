@@ -146,6 +146,16 @@ Migrations use `database.json` for configuration:
 - Provides control over when schema changes occur
 - Prevents automatic changes to production data
 
+## CI Integration
+
+The backend CI workflow runs pending migrations before the test suite and verifies the resulting schema matches expectations:
+
+1. **Apply pending migrations** — `npm run migrate:dev` runs against a fresh SQLite database before tests execute, so tests always run against the current schema.
+2. **Verify schema** — after migrations, the CI step inspects the resulting tables/columns and fails the build if the schema diverges from what the migrations define.
+3. **Rollback check** — migrations are exercised in both directions (`up` then `down`) to guarantee every migration has a working rollback.
+
+This ensures schema drift is caught in CI rather than in production.
+
 ## Best Practices
 
 ### Writing Migrations

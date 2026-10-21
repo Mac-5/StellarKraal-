@@ -1,8 +1,14 @@
 import cron, { ScheduledTask } from "node-cron";
-import { listActiveLoans, getCollateral, updateLoan } from "../db/store";
+import { listActiveLoans, updateLoan } from "../db/store";
 import logger from "../utils/logger";
 import { fireAlert } from "../utils/alerting";
 import { config } from "../config";
+import {
+  computeHealthFactor,
+  healthFactorService,
+  LIQUIDATION_THRESHOLD_BPS,
+  SCALE,
+} from "../services/healthFactorService";
 
 import {
   Contract,
@@ -19,8 +25,6 @@ const NETWORK_PASSPHRASE =
 const CONTRACT_ID = config.CONTRACT_ID;
 const SIMULATION_ACCOUNT = "GASPH4OCYOERATXIKLPNURXUP7ISAQU2KWFB5XLUJ3LQHKHOCN3CEGD6";
 
-const LIQUIDATION_THRESHOLD_BPS = 8_000;
-const SCALE = 10_000;
 /** One hour in milliseconds — cooldown between repeated alerts for the same loan. */
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
@@ -121,29 +125,29 @@ export async function simulateHealthFactor(loanId: string): Promise<number | nul
 }
 
 /**
- * Compute health factor (scaled by 10_000) for a loan locally (fallback / utility).
- * HF = (collateral_value × liq_threshold_bps) / (outstanding × 10_000) × 10_000
- * Returns null when collateral is missing or outstanding is zero.
- * @param collateralValue - Current appraised value of the collateral.
- * @param outstanding - Outstanding loan amount.
- * @returns The health factor scaled by 10,000, or null if inputs are invalid.
- */
-export function computeHealthFactor(collateralValue: number, outstanding: number): number | null {
-  if (outstanding <= 0 || collateralValue <= 0) return null;
-  return (collateralValue * LIQUIDATION_THRESHOLD_BPS) / (outstanding * SCALE) * SCALE;
-}
-
-/**
  * Recalculate health factors for all active/at_risk loans by querying the on-chain contract,
+ * falling back to the HealthFactorService when the simulation is unavailable,
  * flag those below CRIT threshold, and fire configurable warning/critical alerts with per-loan cooldown.
  * @returns The number of loan records updated.
  */
-export async function runHealthFactorJob(): Promise<number> {
+export interface HealthFactorEvaluation {
+  updated: number;
+  candidates: Array<LoanRecord & { health_factor: number }>;
+}
+
+/**
+ * Evaluate all active loans using the same on-chain health-factor lookup as the
+ * scheduled job. Updates are optional so administrative dry-runs are read-only.
+ */
+export async function evaluateHealthFactors(options: {
+  applyUpdates?: boolean;
+} = {}): Promise<HealthFactorEvaluation> {
   const start = Date.now();
   logger.info("healthFactorJob: starting");
 
   const loans = listActiveLoans();
   let updated = 0;
+  const candidates: Array<LoanRecord & { health_factor: number }> = [];
 
   for (const loan of loans) {
     let hf: number | null = null;
@@ -158,13 +162,22 @@ export async function runHealthFactorJob(): Promise<number> {
     }
 
     if (hf === null) {
-      // Gracefully skip loan if simulation fails or returns null
+      // Fall back to the centralized service when the on-chain simulation is unavailable.
+      hf = healthFactorService.calculateHealthFactor(loan.id);
+    }
+
+    if (hf === null) {
+      // Gracefully skip loan if neither simulation nor local calculation yields a value
       continue;
     }
 
     const newStatus = hf < SCALE ? "at_risk" : "active";
 
-    if (loan.health_factor !== hf || loan.status !== newStatus) {
+    if (hf < SCALE) {
+      candidates.push({ ...loan, health_factor: hf, status: newStatus });
+    }
+
+    if (options.applyUpdates !== false && (loan.health_factor !== hf || loan.status !== newStatus)) {
       updateLoan(loan.id, { health_factor: hf, status: newStatus });
       updated++;
     }
@@ -179,7 +192,12 @@ export async function runHealthFactorJob(): Promise<number> {
 
   const duration = Date.now() - start;
   logger.info("healthFactorJob: completed", { duration_ms: duration, updated });
-  return updated;
+  return { updated, candidates };
+}
+
+export async function runHealthFactorJob(): Promise<number> {
+  const result = await evaluateHealthFactors();
+  return result.updated;
 }
 
 /**
@@ -203,3 +221,6 @@ export function scheduleHealthFactorJob(): ScheduledTask {
 export function _resetAlertCooldowns(): void {
   alertCooldowns.clear();
 }
+
+// Re-export the centralized formula so existing importers keep working.
+export { computeHealthFactor, LIQUIDATION_THRESHOLD_BPS };

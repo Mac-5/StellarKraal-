@@ -30,13 +30,31 @@ module.exports = {
         'space-12': '3rem',     // 48 px
         'space-16': '4rem',     // 64 px
       },
-      // ── Typography scale (#298) ──────────────────────────────────────────────
+      // ── Typography scale (#298, #1397) ───────────────────────────────────────
+      // Canonical scale: h1–h6, body, caption, label.
+      // Each token bundles font-size + line-height + font-weight so weight and
+      // line-height pairings are applied consistently (documented below).
+      //
+      //   Token        Size      Line-height  Weight  Use
+      //   heading-1    2.25rem   2.5rem       700     Page title (h1)
+      //   heading-2    1.875rem  2.25rem      700     Section title (h2)
+      //   heading-3    1.5rem    2rem         600     Subsection (h3)
+      //   heading-4    1.25rem   1.75rem      600     Card / group title (h4)
+      //   heading-5    1.125rem  1.5rem       600     Minor heading (h5)
+      //   heading-6    1rem      1.5rem       600     Smallest heading (h6)
+      //   body-lg      1.125rem  1.75rem      400     Lead paragraph
+      //   body         1rem      1.5rem       400     Default body (≥16px)
+      //   body-sm      0.875rem  1.25rem      400     Secondary body
+      //   caption      0.75rem   1rem         400     Captions / helper text
+      //   label        0.875rem  1.25rem      500     Form labels / buttons
       fontSize: {
         // Static (non-fluid) sizes — used directly via Tailwind utilities
         "heading-1": ["2.25rem", { lineHeight: "2.5rem", fontWeight: "700" }],
         "heading-2": ["1.875rem", { lineHeight: "2.25rem", fontWeight: "700" }],
         "heading-3": ["1.5rem", { lineHeight: "2rem", fontWeight: "600" }],
         "heading-4": ["1.25rem", { lineHeight: "1.75rem", fontWeight: "600" }],
+        "heading-5": ["1.125rem", { lineHeight: "1.5rem", fontWeight: "600" }],
+        "heading-6": ["1rem", { lineHeight: "1.5rem", fontWeight: "600" }],
         "body-lg": ["1.125rem", { lineHeight: "1.75rem", fontWeight: "400" }],
         body: ["1rem", { lineHeight: "1.5rem", fontWeight: "400" }],
         "body-sm": ["0.875rem", { lineHeight: "1.25rem", fontWeight: "400" }],
@@ -54,6 +72,23 @@ module.exports = {
         "fluid-h4": ["clamp(1rem, 1.5vw + 0.25rem, 1.375rem)", { lineHeight: "1.4", fontWeight: "600" }],
         // body: 0.9375rem → 1rem
         "fluid-body": ["clamp(0.9375rem, 1vw + 0.25rem, 1.0625rem)", { lineHeight: "1.6", fontWeight: "400" }],
+      },
+      // ── Font weight tokens (#1397) ───────────────────────────────────────────
+      // Paired with the scale above; use these instead of arbitrary weights.
+      fontWeight: {
+        regular: "400",
+        medium: "500",
+        semibold: "600",
+        bold: "700",
+      },
+      // ── Line-height tokens (#1397) ───────────────────────────────────────────
+      // Paired with the scale above; use these instead of arbitrary values.
+      lineHeight: {
+        tight: "1.15",
+        snug: "1.25",
+        normal: "1.5",
+        relaxed: "1.6",
+        loose: "1.75",
       },
       colors: {
         // ── Semantic design tokens (#297) ────────────────────────────────────

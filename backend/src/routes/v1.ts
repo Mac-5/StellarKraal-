@@ -3,7 +3,6 @@
  * Accessed via /api/v1/...
  */
 import { Router, Request, Response, NextFunction } from 'express';
-import { TransactionBuilder, Networks, Transaction } from '@stellar/stellar-sdk';
 import { z } from 'zod';
 import { config } from '../config';
 import { pool } from '../utils/connectionPool';
@@ -18,6 +17,7 @@ import { fireAlert } from '../utils/alerting';
 import { rules } from '../utils/alertRules';
 import rpcClient from '../utils/rpcClient';
 import { healthRouter } from './health';
+import { loanRepaymentRouter } from './loanRepayment';
 import {
   registerCollateralSchema,
   registerCollateral,
@@ -25,7 +25,7 @@ import {
   batchRegisterCollateral,
   getCollateralById,
 } from '../services/collateralService';
-import { getProfile, updateProfile, insertAuditEntry, listCollateral, listLoans, getTransaction } from '../db/store';
+import { getProfile, updateProfile, insertAuditEntry, listCollateral, listLoans, getLoan, getTransaction } from '../db/store';
 import { updateProfileSchema } from '../validators/profile';
 import { validate } from '../middleware/validate';
 import { auditMiddleware, redact, auditLogger } from '../middleware/audit';
@@ -165,93 +165,8 @@ v1Router.post(
   })
 );
 
-/**
- * @openapi
- * /loans/{id}/repay:
- *   post:
- *     tags:
- *       - loan
- *     summary: Submit pre-signed XDR for loan repayment
- *     description: Accepts client pre-signed Soroban XDR directly and submits it to the Stellar RPC network.
- *     operationId: repayLoanOnChain
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         description: Loan ID
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       description: Object containing the base64-encoded signed XDR transaction string.
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             description: Repayment payload with signed XDR string.
- *             required:
- *               - signedXdr
- *             properties:
- *               signedXdr:
- *                 type: string
- *                 description: Base64-encoded signed Stellar transaction XDR
- *                 example: AAAAAG...
- *     responses:
- *       '200':
- *         description: Transaction submitted successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               description: Transaction submission result containing transaction hash and status.
- *               properties:
- *                 hash:
- *                   type: string
- *                   description: Stellar transaction hash
- *                   example: 8f4a...
- *                 status:
- *                   type: string
- *                   description: Submission status
- *                   example: PENDING
- *       '400':
- *         $ref: '#/components/responses/ValidationError'
- *       '500':
- *         $ref: '#/components/responses/InternalError'
- */
-v1Router.post(
-  '/loans/:id/repay',
-  auditMiddleware,
-  timeoutMiddleware(parseInt(config.TIMEOUT_WRITE_MS, 10)),
-  writeLimiter,
-  asyncHandler(async (req: Request, res: Response) => {
-    const signedXdr = req.body.signedXdr;
-    if (!signedXdr || typeof signedXdr !== 'string') {
-      return res.status(400).json({ error: 'signedXdr is required and must be a string' });
-    }
-
-    let tx: Transaction;
-    try {
-      tx = TransactionBuilder.fromXDR(
-        signedXdr,
-        config.NEXT_PUBLIC_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET
-      ) as Transaction;
-    } catch (err) {
-      return res.status(400).json({ error: 'Invalid XDR structure' });
-    }
-
-    if (!tx || !tx.operations || tx.operations.length === 0) {
-      return res.status(400).json({ error: 'Transaction contains no operations' });
-    }
-
-    // Submit the transaction to Soroban RPC
-    const response = await rpcClient.sendTransaction(tx);
-    
-    // contractEventListener will handle on-chain confirmation and DB updates.
-    res.json({ hash: response.hash, status: response.status });
-  })
-);
+// Share the locked repayment submission path with the main application.
+v1Router.use(loanRepaymentRouter);
 
 v1Router.post(
   '/loan/liquidate',
@@ -349,6 +264,14 @@ v1Router.get(
     }
   })
 );
+
+v1Router.get('/loans/:id', readLimiter, (req: Request, res: Response) => {
+  const loan = getLoan(req.params.id as string);
+  if (!loan) {
+    return res.status(404).json({ error: 'Loan not found' });
+  }
+  res.json(loan);
+});
 
 v1Router.post(
   '/oracle/price-update',

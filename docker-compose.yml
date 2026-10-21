@@ -66,6 +66,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    user: '1001:1001'
     ports:
       - "3001:3001"
     env_file: .env
@@ -75,6 +76,8 @@ services:
       - REDIS_URL=redis://redis:6379
     restart: unless-stopped
     healthcheck:
+      # /health returns 200 only when all dependencies are healthy (503 otherwise),
+      # so wget's non-zero exit on 503 correctly marks the container unhealthy.
       test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
       interval: 30s
       timeout: 10s
@@ -97,6 +100,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    user: '1001:1001'
     ports:
       - "3000:3000"
     env_file: .env

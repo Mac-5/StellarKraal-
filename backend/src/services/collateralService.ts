@@ -38,6 +38,28 @@ export const batchRegisterCollateralSchema = z.object({
 export type BatchRegisterCollateralInput = z.infer<typeof batchRegisterCollateralSchema>;
 
 /**
+ * Zod schema that validates a partial collateral update payload.
+ * Only `weight`, `healthStatus`, and `notes` are patchable. At least one of
+ * these fields must be present.
+ */
+export const patchCollateralSchema = z
+  .object({
+    weight: z.number().positive().optional(),
+    healthStatus: z.string().min(1).optional(),
+    notes: z.string().optional(),
+  })
+  .refine(
+    (data) =>
+      data.weight !== undefined ||
+      data.healthStatus !== undefined ||
+      data.notes !== undefined,
+    { message: 'at least one patchable field (weight, healthStatus, notes) is required' }
+  );
+
+/** Inferred TypeScript type for a validated partial collateral update payload. */
+export type PatchCollateralInput = z.infer<typeof patchCollateralSchema>;
+
+/**
  * Builds a `register_livestock` Soroban contract transaction for a single animal
  * registration.
  *
@@ -84,4 +106,70 @@ export async function batchRegisterCollateral(
  */
 export function getCollateralById(id: string) {
   return getCollateral(id);
+}
+
+/**
+ * Applies a partial update to a collateral record.
+ *
+ * Only the owner of the collateral or an admin may patch it. When `weight` or
+ * `healthStatus` changes, a new appraisal is queued (value-affecting fields).
+ *
+ * @param id - Collateral record identifier.
+ * @param patch - Validated partial update payload (see {@link patchCollateralSchema}).
+ * @param actor - The requesting principal: `{ address, isAdmin }`.
+ * @returns The updated collateral record and whether an appraisal was queued.
+ * @throws `CollateralNotFoundError` if no record exists.
+ * @throws `CollateralForbiddenError` if the actor is neither owner nor admin.
+ */
+export async function patchCollateral(
+  id: string,
+  patch: PatchCollateralInput,
+  actor: { address: string; isAdmin: boolean }
+): Promise<{ collateral: Record<string, unknown>; appraisalQueued: boolean }> {
+  const existing = getCollateral(id);
+  if (!existing) {
+    throw new CollateralNotFoundError(id);
+  }
+
+  const owner = (existing as Record<string, unknown>).owner;
+  if (!actor.isAdmin && owner !== actor.address) {
+    throw new CollateralForbiddenError(id);
+  }
+
+  const record = existing as Record<string, unknown>;
+  let appraisalQueued = false;
+
+  if (patch.weight !== undefined && patch.weight !== record.weight) {
+    record.weight = patch.weight;
+    appraisalQueued = true;
+  }
+  if (patch.healthStatus !== undefined && patch.healthStatus !== record.healthStatus) {
+    record.healthStatus = patch.healthStatus;
+    appraisalQueued = true;
+  }
+  if (patch.notes !== undefined) {
+    record.notes = patch.notes;
+  }
+
+  if (appraisalQueued) {
+    record.appraisalStatus = 'queued';
+  }
+
+  return { collateral: record, appraisalQueued };
+}
+
+/** Error thrown when a collateral record cannot be found. */
+export class CollateralNotFoundError extends Error {
+  constructor(id: string) {
+    super(`collateral ${id} not found`);
+    this.name = 'CollateralNotFoundError';
+  }
+}
+
+/** Error thrown when an actor is not permitted to modify a collateral record. */
+export class CollateralForbiddenError extends Error {
+  constructor(id: string) {
+    super(`not authorized to modify collateral ${id}`);
+    this.name = 'CollateralForbiddenError';
+  }
 }

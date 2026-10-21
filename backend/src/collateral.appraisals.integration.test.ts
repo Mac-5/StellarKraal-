@@ -1,9 +1,10 @@
 /**
  * Integration tests for GET /api/v1/collateral/:id/appraisals
- * Covers: multi-appraisal history, empty history, pagination, 404 for unknown/unowned collateral.
+ * Covers shape, notes, authentication, owner/admin access and stable cursor pagination.
  */
 import request from "supertest";
 import app from "./index";
+import { updateCollateral, softDeleteCollateral } from "./db/store";
 
 jest.mock("./utils/logger", () => ({
   __esModule: true,
@@ -49,7 +50,7 @@ jest.mock("@stellar/stellar-sdk", () => {
 const VALID_OWNER = "GBGBE57DSWNBO73HMKLGPCNUR7V4T3WYCXU34AHVZAR3FFFOSVZLEABQ";
 const OTHER_USER = "GASPH4OCYOERATXIKLPNURXUP7ISAQU2KWFB5XLUJ3LQHKHOCN3CEGD6";
 
-let testUser: { publicKey: string; role?: string } = { publicKey: VALID_OWNER };
+let testUser: { publicKey: string; role?: string } | undefined = { publicKey: VALID_OWNER };
 
 jest.mock("./middleware/auth", () => ({
   authRouter: require("express").Router(),
@@ -70,43 +71,49 @@ describe("GET /api/v1/collateral/:id/appraisals", () => {
     testUser = { publicKey: VALID_OWNER };
   });
 
-  it("returns initial appraisal entry after creation", async () => {
+  it("returns the requested appraisal shape and final-page metadata", async () => {
     const { body: c } = await createCollateral();
     const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`);
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.data)).toBe(true);
-    expect(res.body.total).toBeGreaterThanOrEqual(1);
-    expect(res.body.data[0]).toMatchObject({ value: 1_000_000 });
+    expect(res.body.data).toEqual([{ appraisedAt: expect.any(String), valueUSD: 1_000_000, appraiserNote: null }]);
+    expect(res.body.nextCursor).toBeNull();
+    expect(res.body.hasMore).toBe(false);
   });
 
-  it("returns multiple appraisals ordered by date descending", async () => {
+  it("orders appraisals by appraisedAt descending", async () => {
     const { body: c } = await createCollateral();
-
-    await request(app)
-      .put(`/api/v1/collateral/${c.id}/appraise`)
-      .send({ appraised_value: 1_200_000 });
-    await request(app)
-      .put(`/api/v1/collateral/${c.id}/appraise`)
-      .send({ appraised_value: 1_500_000 });
-
+    updateCollateral(c.id, { appraisal_history: [
+      { date: "2026-01-03T00:00:00.000Z", value: 3 },
+      { date: "2026-01-01T00:00:00.000Z", value: 1 },
+      { date: "2026-01-02T00:00:00.000Z", value: 2 },
+    ] });
     const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`);
     expect(res.status).toBe(200);
-    expect(res.body.total).toBeGreaterThanOrEqual(3);
-    // newest first
-    expect(res.body.data[0].value).toBe(1_500_000);
-    expect(res.body.data[1].value).toBe(1_200_000);
+    expect(res.body.data.map((entry: any) => entry.valueUSD)).toEqual([3, 2, 1]);
   });
 
-  it("includes appraiser address on entries added via PUT appraise", async () => {
+  it("preserves appraiser notes recorded through the appraisal route", async () => {
     const { body: c } = await createCollateral();
     await request(app)
       .put(`/api/v1/collateral/${c.id}/appraise`)
-      .send({ appraised_value: 900_000 });
-
+      .send({ appraised_value: 900_000, appraiserNote: "Healthy cattle" });
     const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`);
     expect(res.status).toBe(200);
-    const withAppraiser = res.body.data.find((e: any) => e.appraiser === VALID_OWNER);
-    expect(withAppraiser).toBeDefined();
+    expect(res.body.data[0]).toEqual({ appraisedAt: expect.any(String), valueUSD: 900_000, appraiserNote: "Healthy cattle" });
+  });
+
+  it("returns an empty final page when no appraisals exist", async () => {
+    const { body: c } = await createCollateral();
+    updateCollateral(c.id, { appraisal_history: [] });
+    const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ data: [], nextCursor: null, hasMore: false });
+  });
+
+  it("requires an authenticated caller", async () => {
+    const { body: c } = await createCollateral();
+    testUser = undefined;
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals`)).status).toBe(401);
   });
 
   it("returns 404 for unknown collateral id", async () => {
@@ -114,11 +121,18 @@ describe("GET /api/v1/collateral/:id/appraisals", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 404 when caller is not the owner", async () => {
+  it("does not leak a previously fetched owner's history to another user", async () => {
     const { body: c } = await createCollateral();
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals`)).status).toBe(200);
     testUser = { publicKey: OTHER_USER };
     const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`);
     expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for deleted collateral", async () => {
+    const { body: c } = await createCollateral();
+    softDeleteCollateral(c.id);
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals`)).status).toBe(404);
   });
 
   it("allows admin to retrieve appraisals for any collateral", async () => {
@@ -128,17 +142,44 @@ describe("GET /api/v1/collateral/:id/appraisals", () => {
     expect(res.status).toBe(200);
   });
 
-  it("paginates results correctly", async () => {
+  it("traverses timestamp ties without duplicates or omissions, including concurrent additions", async () => {
     const { body: c } = await createCollateral();
-    // Add 2 more appraisals (total 3 including the initial one)
-    await request(app).put(`/api/v1/collateral/${c.id}/appraise`).send({ appraised_value: 1_100_000 });
-    await request(app).put(`/api/v1/collateral/${c.id}/appraise`).send({ appraised_value: 1_200_000 });
+    const history = [1, 2, 3, 4].map((value) => ({ date: "2026-01-01T00:00:00.000Z", value }));
+    updateCollateral(c.id, { appraisal_history: history });
+    const first = await request(app).get(`/api/v1/collateral/${c.id}/appraisals?limit=2`);
+    expect(first.body.data.map((entry: any) => entry.valueUSD)).toEqual([4, 3]);
+    expect(first.body.hasMore).toBe(true);
+    updateCollateral(c.id, { appraisal_history: [...history, { date: "2026-01-02T00:00:00.000Z", value: 5 }] });
+    const second = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`).query({ limit: 2, cursor: first.body.nextCursor });
+    expect(second.status).toBe(200);
+    expect(second.body.data.map((entry: any) => entry.valueUSD)).toEqual([2, 1]);
+    expect(second.body.nextCursor).toBeNull();
+    expect(second.body.hasMore).toBe(false);
+  });
 
-    const res = await request(app).get(`/api/v1/collateral/${c.id}/appraisals?page=1&limit=2`);
-    expect(res.status).toBe(200);
-    expect(res.body.data.length).toBe(2);
-    expect(res.body.page).toBe(1);
-    expect(res.body.limit).toBe(2);
-    expect(res.body.total).toBeGreaterThanOrEqual(3);
+  it("defaults to 20 records and never returns more than 50 per page", async () => {
+    const { body: c } = await createCollateral();
+    updateCollateral(c.id, { appraisal_history: Array.from({ length: 55 }, (_, i) => ({ date: "2026-01-01T00:00:00.000Z", value: i + 1 })) });
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals`)).body.data).toHaveLength(20);
+    const first = await request(app).get(`/api/v1/collateral/${c.id}/appraisals?limit=50`);
+    expect(first.status).toBe(200);
+    expect(first.body.data).toHaveLength(50);
+    const second = await request(app).get(`/api/v1/collateral/${c.id}/appraisals`).query({ limit: 50, cursor: first.body.nextCursor });
+    expect(second.body.data).toHaveLength(5);
+    expect(second.body.hasMore).toBe(false);
+  });
+
+  it.each(["0", "-1", "51", "1.5", "abc"])("rejects invalid limit %s", async (limit) => {
+    const { body: c } = await createCollateral();
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals`).query({ limit })).status).toBe(400);
+  });
+
+  it("rejects malformed cursors and cursors belonging to another collateral", async () => {
+    const { body: c } = await createCollateral();
+    expect((await request(app).get(`/api/v1/collateral/${c.id}/appraisals?cursor=not-a-cursor`)).status).toBe(400);
+    updateCollateral(c.id, { appraisal_history: [1, 2].map((value) => ({ date: "2026-01-01T00:00:00.000Z", value })) });
+    const first = await request(app).get(`/api/v1/collateral/${c.id}/appraisals?limit=1`);
+    const { body: other } = await createCollateral();
+    expect((await request(app).get(`/api/v1/collateral/${other.id}/appraisals`).query({ cursor: first.body.nextCursor })).status).toBe(400);
   });
 });

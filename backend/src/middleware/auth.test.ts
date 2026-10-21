@@ -3,6 +3,24 @@ import request from "supertest";
 import { Keypair } from "@stellar/stellar-sdk";
 import app from "../index";
 import { jwtMiddleware, _resetRefreshTokens } from "./auth";
+import { insertCollateral } from "../db/store";
+
+jest.mock("../db/refreshTokens", () => {
+  const tokens = new Map<string, { publicKey: string; expiresAt: number }>();
+  return {
+    insertRefreshToken: jest.fn(async (hash: string, publicKey: string, expiresAt: number) => {
+      tokens.set(hash, { publicKey, expiresAt });
+    }),
+    rotateRefreshToken: jest.fn(async (oldHash: string, newHash: string, expiresAt: number) => {
+      const token = tokens.get(oldHash);
+      if (!token || token.expiresAt <= Date.now()) return undefined;
+      tokens.delete(oldHash);
+      tokens.set(newHash, { publicKey: token.publicKey, expiresAt });
+      return token.publicKey;
+    }),
+    _clearRefreshTokens: jest.fn(async () => { tokens.clear(); }),
+  };
+});
 
 jest.mock("../utils/logger", () => ({
   __esModule: true,
@@ -95,7 +113,7 @@ function makeToken(payload: object, secret = JWT_SECRET): string {
 describe("JWT Authentication", () => {
   const kp = (Keypair as any).random();
 
-  beforeEach(() => { _resetRefreshTokens(); });
+  beforeEach(async () => { await _resetRefreshTokens(); });
 
   app.post("/__test/user", jwtMiddleware, (req, res) => {
     res.json({ user: (req as any).user ?? null });
@@ -140,7 +158,28 @@ describe("JWT Authentication", () => {
     });
   });
 
-  describe("POST /api/auth/refresh", () => {
+  describe("POST /api/v1/auth/refresh", () => {
+    it("accepts a body token without an access token and returns a rotated pair", async () => {
+      const { refreshCookie } = await login(kp);
+      const oldToken = refreshCookie.split(";")[0].split("=")[1];
+      const res = await request(app).post("/api/v1/auth/refresh").send({ refreshToken: oldToken });
+      expect(res.status).toBe(200);
+      expect(res.body.refreshToken).toMatch(/^[0-9a-f]{64}$/);
+      expect(res.body.refreshToken).not.toBe(oldToken);
+      expect(res.body.expiresIn).toBe(900);
+      const payload = JSON.parse(Buffer.from(res.body.accessToken.split(".")[1], "base64url").toString());
+      expect(payload.sub).toBe(kp.publicKey());
+      expect(payload.exp - payload.iat).toBe(900);
+      expect((res.headers["set-cookie"] as unknown as string[])[0]).toContain("Max-Age=604800");
+      expect((await request(app).post("/api/v1/auth/refresh").send({ refreshToken: oldToken })).status).toBe(401);
+      expect((await request(app).post("/api/v1/auth/refresh").send({ refreshToken: res.body.refreshToken })).status).toBe(200);
+    });
+
+    it("rejects missing and non-string body tokens", async () => {
+      expect((await request(app).post("/api/v1/auth/refresh").send({})).status).toBe(400);
+      expect((await request(app).post("/api/v1/auth/refresh").send({ refreshToken: 42 })).status).toBe(400);
+    });
+
     it("returns new accessToken and rotated refresh cookie", async () => {
       const { refreshCookie } = await login(kp);
       const res = await request(app).post("/api/auth/refresh").set("Cookie", refreshCookie.split(";")[0]);
@@ -200,6 +239,18 @@ describe("JWT Authentication", () => {
       // Old token should still be rejected
       const res3 = await request(app).post("/api/auth/refresh").set("Cookie", cv1);
       expect(res3.status).toBe(401);
+    });
+  });
+
+  describe("authenticated appraisal history", () => {
+    it("requires a JWT and respects signed owner/admin claims", async () => {
+      const collateral = insertCollateral({ id: "jwt-appraisal-history", owner: kp.publicKey(), animal_type: "cattle", count: 1, appraised_value: 100 });
+      const url = `/api/v1/collateral/${collateral.id}/appraisals`;
+      expect((await request(app).get(url)).status).toBe(401);
+      const exp = Math.floor(Date.now() / 1000) + 900;
+      expect((await request(app).get(url).set("Authorization", `Bearer ${makeToken({ sub: kp.publicKey(), exp })}`)).status).toBe(200);
+      expect((await request(app).get(url).set("Authorization", `Bearer ${makeToken({ sub: "other-wallet", exp })}`)).status).toBe(404);
+      expect((await request(app).get(url).set("Authorization", `Bearer ${makeToken({ sub: "admin-wallet", role: "admin", exp })}`)).status).toBe(200);
     });
   });
 

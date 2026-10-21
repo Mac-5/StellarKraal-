@@ -114,7 +114,7 @@ export default function SearchFilterBar({
         )}
 
         {/* Amount range slider */}
-        <fieldset className="min-w-[240px] flex-1">
+        <fieldset className="w-full min-w-0 flex-1 sm:w-auto sm:min-w-[240px]">
           <legend className="text-xs font-semibold text-brown/60 uppercase tracking-wide mb-1">
             Amount range (XLM)
           </legend>
